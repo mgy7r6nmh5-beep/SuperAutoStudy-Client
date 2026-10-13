@@ -41,9 +41,20 @@
 
 ## 安装
 
+> ### 📦 下载
+>
+> 从 **[Releases 页面](https://github.com/mgy7r6nmh5-beep/SuperAutoStudy-Client/releases/latest)** 下载：
+>
+> | 文件 | 大小 | 说明 |
+> |---|---|---|
+> | `SuperAutoStudy-Setup-1.0.exe` | 142.5 MB | **推荐**，图形化安装向导 |
+> | `SuperAutoStudy-portable.zip` | 282.0 MB | 免安装，解压即用 |
+>
+> 两者都**内含完整的 JDK 8 + MySQL 5.7 运行时**，不需要自己装 Java 或数据库。
+
 ### 方式 A：安装包（推荐）
 
-1. 双击 **`SuperAutoStudy-Setup-1.0.exe`**
+1. 双击从 Releases 下载的 **`SuperAutoStudy-Setup-1.0.exe`**
 2. 按向导下一步（中文界面）。默认装到 `%LOCALAPPDATA%\Programs\SuperAutoStudy`，**不需要管理员权限**
 3. 装完勾选「立即启动」，或之后从**桌面 / 开始菜单的快捷方式**启动
 
@@ -51,7 +62,7 @@
 
 ### 方式 B：便携版
 
-1. 把 `SuperAutoStudy` 文件夹拷到目标电脑的**任意位置**（路径可以有中文/空格，但别放 C 盘根目录）
+1. 解压从 Releases 下载的 `SuperAutoStudy-portable.zip`，把里面的 `SuperAutoStudy` 文件夹拷到目标电脑的**任意位置**（路径可以有中文/空格，但别放 C 盘根目录）
 2. 双击 **`启动.cmd`**
 
 > **换目录后必须重跑一次启动脚本** —— 它会按当前路径重写 `my.ini`，否则 MySQL 会因为路径不对起不来。
