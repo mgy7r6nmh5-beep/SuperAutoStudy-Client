@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark" data-accent="teal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SuperAutoStudy</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4H19v14H6.5A2.5 2.5 0 0 0 4 20.5z"/>
+      <path d="M4 6.5v14"/><path d="M8.5 8.5h7M8.5 12h5"/>
+    </svg>
+    <span class="brand-name">SuperAutoStudy</span>
+    <span class="brand-sub">控制台</span>
+  </div>
+
+  <div class="svc" id="svc"></div>
+
+  <div class="topbar-actions">
+    <button class="btn btn-ghost" id="btn-open" title="在浏览器中打开后端页面">打开网页</button>
+    <button class="btn" id="btn-rescan" title="让后端重新扫描待处理任务">重扫队列</button>
+    <button class="btn" id="btn-reset" title="把中断/失败的任务捞回待处理">续刷 / 重试</button>
+    <button class="btn btn-primary" id="btn-start">启动服务</button>
+    <button class="btn btn-danger" id="btn-stop">停止服务</button>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab is-active" data-view="overview">总览</button>
+  <button class="tab" data-view="courses">课程队列</button>
+  <button class="tab" data-view="enroll">登录 / 选课</button>
+  <button class="tab" data-view="settings">设置</button>
+  <button class="tab" data-view="logs">日志</button>
+</nav>
+
+<main id="view" class="view"></main>
+
+<div id="toast" class="toast" hidden></div>
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="modal-title">详情</span>
+      <button class="btn btn-ghost btn-icon" id="modal-close" aria-label="关闭">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

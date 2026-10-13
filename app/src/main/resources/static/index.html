@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SuperAutoStudy 控制台</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+  body{padding:var(--s5)}
+  .wrap{max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:var(--s4)}
+
+  header.app{display:flex;align-items:baseline;justify-content:space-between;gap:var(--s4);flex-wrap:wrap}
+  header.app h1{font-size:var(--t-lg);font-weight:500;letter-spacing:.01em}
+  header.app .sub{font-size:var(--t-sm);color:var(--fg-2);margin-top:2px}
+
+  .step{display:inline-flex;align-items:center;justify-content:center;
+    width:18px;height:18px;flex:none;border-radius:var(--r-sm);
+    background:var(--bg-3);color:var(--fg-1);
+    font-size:var(--t-xs);font-family:var(--font-mono)}
+
+  form.login{display:grid;grid-template-columns:1fr 1fr auto;gap:var(--s3);align-items:end}
+  @media (max-width:720px){form.login{grid-template-columns:1fr}}
+
+  table{width:100%;border-collapse:collapse;font-size:var(--t-md)}
+  th,td{text-align:left;padding:var(--s2) var(--s3);border-bottom:1px solid var(--line);vertical-align:middle}
+  th{color:var(--fg-1);font-weight:400;font-size:var(--t-sm);
+     position:sticky;top:0;background:var(--bg-1);z-index:1}
+  tbody tr:hover{background:var(--bg-2)}
+  td.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-size:var(--t-sm);color:var(--fg-1)}
+  .scroll{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:var(--r-md)}
+  .empty{padding:var(--s6) var(--s4);text-align:center;color:var(--fg-2);font-size:var(--t-md)}
+
+  input[type=checkbox]{width:14px;height:14px;accent-color:var(--accent);cursor:pointer}
+
+  .legend{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s3);font-size:var(--t-sm);color:var(--fg-1)}
+  code{font-family:var(--font-mono);font-size:var(--t-sm);
+       background:var(--bg-2);border:1px solid var(--line);border-radius:var(--r-sm);padding:1px 5px}
+  .hint{font-size:var(--t-sm);color:var(--fg-2);line-height:1.75}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="app">
+    <div>
+      <h1>SuperAutoStudy 控制台</h1>
+      <div class="sub">超星学习通任务提交 · 本地部署 · 无前端依赖</div>
+    </div>
+    <div class="row">
+      <span class="dot" id="conn-dot"></span>
+      <span class="mono" id="conn-text" style="font-size:var(--t-sm)">检测中…</span>
+      <button class="btn btn-ghost" id="btn-ping">重测</button>
+    </div>
+  </header>
+
+  <!-- 步骤 1 -->
+  <section class="panel">
+    <div class="panel-head">
+      <div class="row"><span class="step">1</span><span class="panel-title">登录超星</span></div>
+      <span class="hint">登录成功后会把 Cookie 写入 <code>th_wk_user</code>，是提交任务的前提</span>
+    </div>
+    <form class="login" id="form-login" autocomplete="off">
+      <div>
+        <label class="label" for="account">学号 / 手机号</label>
+        <input class="field mono" id="account" placeholder="输入超星账号" required>
+      </div>
+      <div>
+        <label class="label" for="password">密码</label>
+        <input class="field mono" id="password" type="password" placeholder="输入密码" required>
+      </div>
+      <button class="btn btn-primary" type="submit" id="btn-courses">获取课程列表</button>
+    </form>
+  </section>
+
+  <!-- 步骤 2 -->
+  <section class="panel">
+    <div class="panel-head">
+      <div class="row"><span class="step">2</span><span class="panel-title">选择课程并提交任务</span></div>
+      <div class="row">
+        <span class="tag" id="sel-count">已选 0 门</span>
+        <button class="btn btn-ghost" id="btn-toggle-all" disabled>全选 / 取消</button>
+        <button class="btn" id="btn-rescan">重新扫描队列</button>
+      </div>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:34px"></th>
+            <th>课程名称</th>
+            <th style="width:110px">教师</th>
+            <th style="width:150px">courseId</th>
+            <th style="width:130px">clazzId</th>
+          </tr>
+        </thead>
+        <tbody id="course-body">
+          <tr><td colspan="5"><div class="empty">先在上一步登录，课程列表会出现在这里</div></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row-between" style="margin-top:var(--s4)">
+      <span class="hint">提交后任务立即开始执行，无需额外操作</span>
+      <button class="btn btn-primary" id="btn-submit" disabled>提交选中任务</button>
+    </div>
+  </section>
+
+  <!-- 步骤 3 -->
+  <section class="panel">
+    <div class="panel-head">
+      <div class="row"><span class="step">3</span><span class="panel-title">运行日志</span></div>
+      <button class="btn btn-ghost" id="btn-clear">清空</button>
+    </div>
+    <pre class="log" id="log"></pre>
+  </section>
+
+  <!-- 进度与说明 -->
+  <section class="panel">
+    <div class="panel-head">
+      <div class="row"><span class="step">i</span><span class="panel-title">怎么看进度</span></div>
+    </div>
+    <p class="hint">
+      后端没有查询进度的接口，进度写在数据库里。用下面的命令看（在
+      <code>SuperAutoStudy</code> 目录下执行）：
+    </p>
+    <pre class="log" style="max-height:none;margin-top:var(--s3)">mysql.exe -u root -pSuperAuto2026 tihai -e "SELECT course_name,current_job,current_progress,status,error_message,start_time FROM th_wk_log ORDER BY id DESC LIMIT 20;"</pre>
+
+    <div class="divider"></div>
+
+    <div class="panel-title" style="margin-bottom:var(--s3)">状态码对照</div>
+    <div class="legend">
+      <span class="tag">0 待处理</span>
+      <span class="tag tag-info">1 进行中</span>
+      <span class="tag">2 队列中</span>
+      <span class="tag">3 考试中</span>
+      <span class="tag tag-ok">4 已完成</span>
+      <span class="tag tag-err">5 异常</span>
+      <span class="tag">6 暂停</span>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="panel-title" style="margin-bottom:var(--s3)">常见情况</div>
+    <dl class="kv">
+      <dt>日志出现「用户未登录」</dt>
+      <dd style="font-family:var(--font-ui)">登录写入是异步的，点一次「重新扫描队列」即可</dd>
+      <dt>提交后提示「任务已存在」</dt>
+      <dd style="font-family:var(--font-ui)">同一账号 + 同一课程已有记录，不会重复提交</dd>
+      <dt>获取课程列表失败</dt>
+      <dd style="font-family:var(--font-ui)">账号密码错误，或超星要求验证码（本工具不支持验证码）</dd>
+      <dt>倍速</dt>
+      <dd>默认 3 倍，改 application-dev.yml 的 study.chaoxing.speed</dd>
+    </dl>
+  </section>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var state = { courses: [], selected: new Set(), account: '', password: '' };
+
+  /* ---------- 日志 ---------- */
+  function log(msg, kind) {
+    var pre = $('log');
+    var t = new Date().toTimeString().slice(0, 8);
+    var cls = kind ? 'l-' + kind : '';
+    var line = document.createElement('span');
+    line.innerHTML = '<span class="t">' + t + '</span>  ' +
+      (cls ? '<span class="' + cls + '">' + esc(msg) + '</span>' : esc(msg));
+    pre.appendChild(line);
+    pre.appendChild(document.createTextNode('\n'));
+    pre.scrollTop = pre.scrollHeight;
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  /* ---------- 请求 ---------- */
+  function post(path, body) {
+    return fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(read);
+  }
+  function get(path) {
+    return fetch(path, { method: 'GET' }).then(read);
+  }
+  function read(res) {
+    return res.text().then(function (text) {
+      // 空响应体是合法的：GET /chaoxing 的 start() 返回 void
+      if (!text) { return { code: res.ok ? 200 : res.status }; }
+      try { return JSON.parse(text); }
+      catch (e) { throw new Error('HTTP ' + res.status + ' 非 JSON 响应: ' + text.slice(0, 160)); }
+    });
+  }
+
+  /* ---------- 连接状态 ---------- */
+  function ping() {
+    $('conn-dot').className = 'dot dot-warn dot-live';
+    $('conn-text').textContent = '检测中…';
+    // 用首页探活：GET /chaoxing 有副作用（会触发一次队列扫描），不能拿来当健康检查
+    fetch('/', { cache: 'no-store' })
+      .then(function (res) {
+        if (!res.ok) { throw new Error('HTTP ' + res.status); }
+        $('conn-dot').className = 'dot dot-ok';
+        $('conn-text').textContent = location.host;
+      })
+      .catch(function (e) {
+        $('conn-dot').className = 'dot dot-err';
+        $('conn-text').textContent = '不可达';
+        log('连接失败: ' + e.message, 'err');
+      });
+  }
+
+  /* ---------- 渲染课程 ---------- */
+  function render() {
+    var body = $('course-body');
+    body.innerHTML = '';
+
+    if (!state.courses.length) {
+      body.innerHTML = '<tr><td colspan="5"><div class="empty">没有获取到课程</div></td></tr>';
+      $('btn-toggle-all').disabled = true;
+      $('btn-submit').disabled = true;
+      updateCount();
+      return;
+    }
+
+    state.courses.forEach(function (c, i) {
+      var tr = document.createElement('tr');
+
+      var tdCk = document.createElement('td');
+      var ck = document.createElement('input');
+      ck.type = 'checkbox';
+      ck.checked = state.selected.has(i);
+      ck.addEventListener('change', function () {
+        if (ck.checked) { state.selected.add(i); } else { state.selected.delete(i); }
+        updateCount();
+      });
+      tdCk.appendChild(ck);
+
+      var tdName = document.createElement('td');
+      tdName.textContent = c.title || '(无标题)';
+      if (c.desc) { tdName.title = c.desc; }
+
+      var tdTeacher = document.createElement('td');
+      tdTeacher.className = 'mono';
+      tdTeacher.textContent = c.teacher || '—';
+
+      var tdCid = document.createElement('td');
+      tdCid.className = 'mono';
+      tdCid.textContent = c.courseId || '—';
+
+      var tdClazz = document.createElement('td');
+      tdClazz.className = 'mono';
+      tdClazz.textContent = c.clazzId || '—';
+
+      tr.appendChild(tdCk);
+      tr.appendChild(tdName);
+      tr.appendChild(tdTeacher);
+      tr.appendChild(tdCid);
+      tr.appendChild(tdClazz);
+      body.appendChild(tr);
+    });
+
+    $('btn-toggle-all').disabled = false;
+    updateCount();
+  }
+
+  function updateCount() {
+    var n = state.selected.size;
+    $('sel-count').textContent = '已选 ' + n + ' 门';
+    $('btn-submit').disabled = n === 0;
+  }
+
+  /* ---------- 事件 ---------- */
+  $('btn-ping').addEventListener('click', ping);
+
+  $('form-login').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var account = $('account').value.trim();
+    var password = $('password').value;
+    if (!account || !password) { return; }
+
+    state.account = account;
+    state.password = password;
+    state.selected.clear();
+
+    var btn = $('btn-courses');
+    btn.disabled = true;
+    btn.textContent = '登录中…';
+    log('正在登录 ' + account + ' …', 'info');
+
+    post('/chaoxing/course', { account: account, password: password })
+      .then(function (r) {
+        if (String(r.code) !== '200') {
+          log('登录失败: ' + (r.msg || '未知错误') + (r.subCode ? ' (subCode=' + r.subCode + ')' : ''), 'err');
+          state.courses = [];
+          render();
+          return;
+        }
+        state.courses = Array.isArray(r.data) ? r.data : [];
+        log('登录成功，获取到 ' + state.courses.length + ' 门课程', 'ok');
+        render();
+      })
+      .catch(function (err) { log('请求异常: ' + err.message, 'err'); })
+      .finally(function () {
+        btn.disabled = false;
+        btn.textContent = '获取课程列表';
+      });
+  });
+
+  $('btn-toggle-all').addEventListener('click', function () {
+    if (state.selected.size === state.courses.length) {
+      state.selected.clear();
+    } else {
+      state.courses.forEach(function (_, i) { state.selected.add(i); });
+    }
+    render();
+  });
+
+  $('btn-submit').addEventListener('click', function () {
+    var picked = Array.from(state.selected).map(function (i) { return state.courses[i]; });
+    if (!picked.length) { return; }
+
+    var btn = $('btn-submit');
+    btn.disabled = true;
+    log('提交 ' + picked.length + ' 个任务 …', 'info');
+
+    // 串行提交：每提交一门课，后端都会跑一次队列扫描（startChaoxingTask）。
+    // 如果并发发请求，多次扫描会读到同一批"待处理"任务、把同一门课重复投进
+    // 线程池（后端已加原子认领修掉，但串行仍然更直观：日志顺序清晰、便于排查）。
+    var ok = 0, dup = 0;
+
+    function submitOne(i) {
+      if (i >= picked.length) {
+        log('提交结束：成功 ' + ok + '，已存在 ' + dup + '，共 ' + picked.length, ok ? 'ok' : 'warn');
+        btn.disabled = false;
+        return;
+      }
+      var c = picked[i];
+      post('/chaoxing', {
+        loginAccount: state.account,
+        password: state.password,
+        schoolName: '',
+        courseId: c.courseId,
+        courseName: c.title
+      }).then(function (r) {
+        if (String(r.code) === '200') {
+          ok++;
+          log('已提交: ' + c.title, 'ok');
+        } else if (r.subCode === 20001 || r.subCode === '20001') {
+          dup++;
+          log('已存在，跳过: ' + c.title, 'warn');
+        } else {
+          log('失败: ' + c.title + ' — ' + (r.msg || '未知错误'), 'err');
+        }
+      }).catch(function (err) {
+        log('失败: ' + c.title + ' — ' + err.message, 'err');
+      }).finally(function () {
+        submitOne(i + 1);
+      });
+    }
+
+    submitOne(0);
+  });
+
+  $('btn-rescan').addEventListener('click', function () {
+    log('触发队列扫描 …', 'info');
+    get('/chaoxing')
+      .then(function () { log('扫描完成，PENDING 的任务已重新入队', 'ok'); })
+      .catch(function (e) { log('扫描失败: ' + e.message, 'err'); });
+  });
+
+  $('btn-clear').addEventListener('click', function () { $('log').textContent = ''; });
+
+  ping();
+})();
+</script>
+</body>
+</html>

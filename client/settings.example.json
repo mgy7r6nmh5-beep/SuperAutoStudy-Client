@@ -1,0 +1,9 @@
+{
+  "video_report_pace_ms": 60000,
+  "core_size": 3,
+  "video_max_rounds": 2,
+  "skip_job_types": [
+    "workid"
+  ],
+  "video_only_course_ids": []
+}

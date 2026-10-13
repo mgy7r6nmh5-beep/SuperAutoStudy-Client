@@ -1,0 +1,226 @@
+/* ============================================================
+   SuperAutoStudy 客户端 —— 布局与组件
+   色值全部来自 tokens.css，不在这里写死颜色
+   ============================================================ */
+
+html, body { height: 100%; }
+body {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---------------- 顶栏 ---------------- */
+.topbar {
+  display: flex; align-items: center; gap: var(--s4);
+  padding: var(--s3) var(--s4);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: var(--s2); color: var(--accent); }
+.brand-name { font-size: var(--t-base); font-weight: 500; color: var(--fg-0); letter-spacing: .2px; }
+.brand-sub { font-size: var(--t-sm); color: var(--fg-2); }
+
+.svc { display: flex; gap: var(--s4); margin-left: auto; font-size: var(--t-sm); }
+.svc-item { display: flex; align-items: center; gap: 6px; color: var(--fg-2); white-space: nowrap; }
+.svc-item.on { color: var(--fg-0); }
+.svc-item .mono { font-size: var(--t-xs); }
+
+.topbar-actions { display: flex; gap: var(--s2); }
+
+/* ---------------- 标签导航 ---------------- */
+.tabs {
+  display: flex; gap: 2px; padding: 0 var(--s4);
+  background: var(--bg-1); border-bottom: 1px solid var(--line);
+}
+.tab {
+  position: relative; padding: var(--s3) var(--s3) calc(var(--s3) - 1px);
+  background: none; border: 0; border-bottom: 2px solid transparent;
+  color: var(--fg-1); font-family: inherit; font-size: var(--t-md);
+  cursor: pointer; transition: color var(--dur) var(--ease);
+}
+.tab:hover { color: var(--fg-0); }
+.tab.is-active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ---------------- 主视图 ---------------- */
+.view { overflow: auto; padding: var(--s5); }
+.view-inner { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--s4); }
+
+/* ---------------- 统计卡 ---------------- */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s3); }
+.stat {
+  background: var(--bg-1); border: 1px solid var(--line);
+  border-radius: var(--r-lg); padding: var(--s3) var(--s4);
+}
+.stat-label { font-size: var(--t-sm); color: var(--fg-1); }
+.stat-value {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: var(--t-2xl); line-height: 1.25; margin-top: 2px;
+}
+.stat-value.ok { color: var(--ok); }
+.stat-value.run { color: var(--accent); }
+.stat-value.err { color: var(--err); }
+
+/* ---------------- 进度条 ---------------- */
+.bar { height: 6px; background: var(--bg-3); border-radius: 3px; overflow: hidden; min-width: 60px; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width var(--dur) var(--ease); }
+.bar.ok > i { background: var(--ok); }
+.bar.err > i { background: var(--err); }
+.bar.idle > i { background: var(--fg-2); }
+
+.bar-row { display: flex; align-items: center; gap: var(--s3); }
+.bar-row .bar { flex: 1; }
+.bar-pct {
+  font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+  font-size: var(--t-sm); color: var(--fg-1); min-width: 46px; text-align: right;
+}
+
+/* ---------------- 直播视频卡 ---------------- */
+.live-list { display: flex; flex-direction: column; gap: var(--s3); }
+.live-card {
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: var(--r-md); padding: var(--s3);
+  display: flex; flex-direction: column; gap: var(--s2);
+}
+.live-card .bar-row { max-width: 480px; }
+.live-head { display: flex; align-items: center; gap: var(--s2); }
+.live-thread {
+  font-family: var(--font-mono); font-size: var(--t-xs); color: var(--fg-2);
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 0 5px;
+}
+.live-course { font-size: var(--t-sm); color: var(--fg-1); }
+.live-job {
+  font-size: var(--t-md); color: var(--fg-0);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.live-meta { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--fg-2); }
+
+/* ---------------- 课程行 ---------------- */
+.course-list { display: flex; flex-direction: column; gap: var(--s2); }
+.course-row {
+  display: grid;
+  grid-template-columns: 1.6fr 90px 1.5fr 110px auto;
+  align-items: center; gap: var(--s3);
+  background: var(--bg-1); border: 1px solid var(--line);
+  border-radius: var(--r-md); padding: var(--s3) var(--s4);
+  transition: border-color var(--dur) var(--ease);
+}
+.course-row:hover { border-color: var(--line-strong); }
+.course-name { font-size: var(--t-md); color: var(--fg-0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.course-sub { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--fg-2); }
+.course-job { font-size: var(--t-sm); color: var(--fg-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.course-ops { display: flex; gap: var(--s1); justify-content: flex-end; }
+
+/* ---------------- 任务点（每条视频） ---------------- */
+.points-head { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; margin-bottom: var(--s3); }
+.job-list { display: flex; flex-direction: column; gap: 1px; }
+.job-row {
+  display: grid; grid-template-columns: 20px 1fr 92px 120px;
+  align-items: center; gap: var(--s3);
+  padding: var(--s2) var(--s3); border-radius: var(--r-sm);
+  background: var(--bg-1);
+}
+.job-row:hover { background: var(--bg-2); }
+.job-row.is-done { opacity: .62; }
+.job-row.is-done .job-name { color: var(--fg-1); }
+.job-mark { width: 14px; height: 14px; flex: none; }
+.job-mark.ok { color: var(--ok); }
+.job-mark.no { color: var(--fg-2); }
+.job-name { font-size: var(--t-sm); color: var(--fg-0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-chapter { font-size: var(--t-xs); color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-type { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--fg-2); text-align: right; }
+.job-dur { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: var(--t-xs); color: var(--fg-2); text-align: right; }
+.chapter-head { display: flex; align-items: baseline; gap: var(--s3); margin-bottom: var(--s2); }
+.chapter-head .setting-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-sm { padding: 3px 9px; font-size: var(--t-xs); }
+
+/* ---------------- 表单 ---------------- */
+.form-grid { display: grid; gap: var(--s3); }
+.form-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+.hint { font-size: var(--t-sm); color: var(--fg-2); }
+
+/* 复选列表 */
+.check-list { display: flex; flex-direction: column; gap: 1px; max-height: 420px; overflow: auto; }
+.check-item {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s2) var(--s3); border-radius: var(--r-sm); cursor: pointer;
+}
+.check-item:hover { background: var(--bg-2); }
+.check-item input { accent-color: var(--accent); width: 15px; height: 15px; }
+.check-title { flex: 1; font-size: var(--t-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.check-sub { font-family: var(--font-mono); font-size: var(--t-xs); color: var(--fg-2); }
+
+/* 设置项 */
+.setting-row {
+  display: grid; grid-template-columns: 1fr 200px;
+  gap: var(--s4); align-items: start;
+  padding: var(--s3) 0; border-bottom: 1px solid var(--line);
+}
+.setting-row:last-child { border-bottom: 0; }
+.setting-name { font-size: var(--t-md); color: var(--fg-0); }
+.setting-desc { font-size: var(--t-sm); color: var(--fg-2); margin-top: 2px; }
+.setting-input { display: flex; flex-direction: column; gap: var(--s2); }
+
+/* ---------------- 日志 ---------------- */
+.log-toolbar { display: flex; align-items: center; gap: var(--s3); margin-bottom: var(--s3); }
+.log-toolbar .field { max-width: 280px; }
+.log-box {
+  background: var(--bg-0); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: var(--s3); height: calc(100vh - 300px); min-height: 260px; overflow: auto;
+  font-family: var(--font-mono); font-size: var(--t-sm); line-height: 1.75;
+  font-variant-numeric: tabular-nums; white-space: pre; word-break: normal;
+}
+.log-line { display: block; }
+.log-line.hl-err { color: var(--err); }
+.log-line.hl-warn { color: var(--warn); }
+.log-line.hl-ok { color: var(--ok); }
+.log-line.hl-dim { color: var(--fg-2); }
+.log-line mark { background: var(--accent-dim); color: var(--accent-hi); border-radius: 2px; }
+/* 窄窗口才允许折行，否则 Dubbo 那种超长行会糊成一团 */
+@media (max-width: 1100px) {
+  .log-box { white-space: pre-wrap; word-break: break-all; }
+}
+
+/* ---------------- 提示 / 弹层 ---------------- */
+.toast {
+  position: fixed; left: 50%; bottom: var(--s6); transform: translateX(-50%);
+  background: var(--bg-3); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); padding: var(--s3) var(--s4);
+  font-size: var(--t-md); color: var(--fg-0);
+  box-shadow: 0 6px 24px rgba(0,0,0,.35); z-index: 50; max-width: 70vw;
+}
+.toast.err { border-color: var(--err); color: var(--err); }
+.toast.ok { border-color: var(--accent); }
+
+.modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center; z-index: 60;
+}
+.modal.hidden, .toast[hidden] { display: none; }
+.modal-box {
+  background: var(--bg-1); border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg); width: min(860px, 92vw); max-height: 84vh;
+  display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0,0,0,.5);
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--s4); border-bottom: 1px solid var(--line);
+  font-size: var(--t-md); font-weight: 500;
+}
+.modal-body { padding: var(--s4); overflow: auto; }
+.btn-icon { padding: var(--s1); min-height: 24px; }
+
+/* ---------------- 空状态 ---------------- */
+.empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--s2); padding: var(--s7) var(--s4); color: var(--fg-2); font-size: var(--t-sm);
+}
+
+/* ---------------- 小屏 ---------------- */
+@media (max-width: 900px) {
+  .course-row { grid-template-columns: 1fr; gap: var(--s2); }
+  .course-ops { justify-content: flex-start; }
+  .form-2, .setting-row { grid-template-columns: 1fr; }
+  .svc { display: none; }
+}
