@@ -174,6 +174,9 @@ function viewOverview(d) {
         </div>
         <div class="live-meta">播放位置 ${fmtDur(v.position)} / ${fmtDur(v.duration)}
           · 已进行 ${fmtDur(v.elapsed)}${v.round > 1 ? ` · 第 ${v.round} 遍` : ''}</div>
+        ${(v.divisor && v.divisor > 1)
+          ? `<div class="live-hint">已进行 ≈ 位置 × ${v.divisor}：${v.divisor} 个刷课线程共用 ${fmtDur(((d.settings && d.settings.video_report_pace_ms) || 60000) / 1000)} 上报间隔（超星按账号风控，多线程须排队），位置以 1/${v.divisor} 速度推进，总进度不变</div>`
+          : ''}
       </div>`).join('') + `</div>`;
   }
 

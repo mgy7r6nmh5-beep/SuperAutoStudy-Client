@@ -806,6 +806,10 @@ class LiveTracker:
                 "position": pos,
                 "round": v.get("round", 1),
                 "percent": round(pct, 1),
+                # 供界面解释「已进行 ≈ 位置 × N」：N 个刷课线程共享同一个
+                # 上报间隔（超星风控按账号，多线程必须排队），每条视频的
+                # 播放位置只以 1/N 速度推进，总吞吐不变。
+                "divisor": n_threads,
             })
         out.sort(key=lambda x: x["thread"])
         return out
