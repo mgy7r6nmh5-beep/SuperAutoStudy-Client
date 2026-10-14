@@ -285,6 +285,8 @@ python client/server.py
 | **进度显示（修复）** | 后端上报时打印精确「播放位置」，客户端据此显示真实进度，替代原先按墙钟折算导致的高估 |
 | **刷课稳定性（修复）** | 视频计分判定、风控退避、上报节流等若干修复；并将误用 `log.error` 输出的正常启动信息改为 `log.info` |
 | **开箱即用打包（新增）** | 自带 JDK 8 / MySQL 5.7 / Python 3.13 的便携包，以及 Inno Setup 安装程序（免管理员权限、中文向导、可卸载） |
+| **防休眠（新增）** | 客户端「设置 → 运行选项」中可开关「运行时防止电脑休眠」：持续调用 `SetThreadExecutionState`（`ES_CONTINUOUS \| ES_SYSTEM_REQUIRED \| ES_AWAYMODE_REQUIRED`）阻止系统休眠/睡眠，同时保留「离开模式」—— 屏幕照常关闭、系统不算睡眠。开关即时生效，变更下一轮 1 秒内生效 |
+| **瘦身打包（v1.0.2）** | MySQL 只留 3 个二进制 + redo 日志 48M×2 → 16M×2；JDK 删 `tools.jar`/`ct.sym` 等开发期文件；fat jar 显式排除无引用的 lombok/pdfbox/dashscope 等。产物从 609 MB 降到 354 MB，安装包 142 MB → 109 MB |
 
 ---
 

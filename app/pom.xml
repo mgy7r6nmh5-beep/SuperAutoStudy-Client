@@ -47,7 +47,7 @@
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <version>1.18.22</version>
-            <scope>compile</scope>
+            <scope>provided</scope>
         </dependency>
 
 
@@ -86,14 +86,15 @@
             <groupId>org.apache.pdfbox</groupId>
             <artifactId>fontbox</artifactId>
             <version>2.0.24</version>
+            <scope>provided</scope>
         </dependency>
 
         <dependency>
             <groupId>org.apache.pdfbox</groupId>
             <artifactId>pdfbox</artifactId>
             <version>2.0.27</version> <!-- 这里使用的版本可以根据需要调整 -->
+            <scope>provided</scope>
         </dependency>
-
 
 
 
@@ -141,11 +142,17 @@
             <groupId>com.alibaba</groupId>
             <artifactId>dashscope-sdk-java</artifactId>
             <version>2.18.3</version>
+            <scope>provided</scope>
             <exclusions>
                 <!-- 排除冲突的 SLF4J 简单绑定 -->
                 <exclusion>
                     <groupId>org.slf4j</groupId>
                     <artifactId>slf4j-simple</artifactId>
+                </exclusion>
+                <!-- 我们只跑 Windows/x64，Linux 原生 QUIC 编解码器（约 2.8MB）纯占体积 -->
+                <exclusion>
+                    <groupId>io.netty.incubator</groupId>
+                    <artifactId>netty-incubator-codec-native-quic</artifactId>
                 </exclusion>
             </exclusions>
         </dependency>
@@ -182,12 +189,25 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
+            <exclusions>
+                <!-- 只跑 Windows/x64。QUIC 的 Linux 原生编解码器（约 2.8MB）纯占体积 -->
+                <exclusion>
+                    <groupId>io.projectreactor.netty.incubator</groupId>
+                    <artifactId>reactor-netty-incubator-quic</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- 连接池优化 -->
         <dependency>
             <groupId>io.projectreactor.netty</groupId>
             <artifactId>reactor-netty</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>io.projectreactor.netty.incubator</groupId>
+                    <artifactId>reactor-netty-incubator-quic</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <dependency>
@@ -266,7 +286,34 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
-
+                <configuration>
+                    <!-- 这些依赖在 pom 里已改成 provided 作用域（源码编译期用得到，
+                         运行时一个字节都不碰），但 Boot 2.7 的 repackage 默认仍会把
+                         provided 也塞进 BOOT-INF/lib。这里按坐标显式排除，瘦身。
+                         新增依赖时如果发现 fat jar 里混进用不到的大包，就加到这里。 -->
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                        <exclude>
+                            <groupId>org.apache.pdfbox</groupId>
+                            <artifactId>pdfbox</artifactId>
+                        </exclude>
+                        <exclude>
+                            <groupId>org.apache.pdfbox</groupId>
+                            <artifactId>fontbox</artifactId>
+                        </exclude>
+                        <exclude>
+                            <groupId>com.alibaba</groupId>
+                            <artifactId>dashscope-sdk-java</artifactId>
+                        </exclude>
+                        <exclude>
+                            <groupId>io.reactivex.rxjava2</groupId>
+                            <artifactId>rxjava</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
             </plugin>
 
             <plugin>

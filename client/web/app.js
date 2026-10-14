@@ -219,6 +219,9 @@ function viewOverview(d) {
         <dt>上报节奏</dt><dd>${d.settings.video_report_pace_ms} ms / 条</dd>
         <dt>并发线程</dt><dd>${d.settings.core_size}</dd>
         <dt>跳过任务点</dt><dd>${esc((d.settings.skip_job_types || []).join(', ') || '（无）')}</dd>
+        <dt>防休眠</dt><dd>${d.settings.keep_awake
+          ? (d.keep_awake && d.keep_awake.active ? '已开启 · 生效中' : '已开启')
+          : '已关闭'}</dd>
       </dl>
     </div>
   </div>`;
@@ -424,6 +427,36 @@ function viewSettings(d) {
       <div class="row" style="margin-top:var(--s4)">
         <button class="btn btn-primary" data-act="save-settings">保存设置</button>
         <button class="btn" data-act="restart-backend">保存并重启后端</button>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:var(--s4)">
+      <div class="panel-head">
+        <span class="panel-title">运行选项</span>
+        <span class="hint">改这里立刻生效，不用重启后端</span>
+      </div>
+
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">运行时防止电脑休眠</div>
+          <div class="setting-desc">
+            客户端开着的时候持续告诉 Windows「有程序在干活」，系统不会自动休眠、睡眠或关机
+            （屏幕照样会自动关闭，不影响省电）。<br>
+            适合挂着刷课时无人值守；关掉后系统恢复默认电源策略。
+            ${d.keep_awake && d.keep_awake.supported === false
+              ? '<br><b style="color:var(--err)">当前环境不支持（仅 Windows 有效）</b>'
+                + (d.keep_awake.last_err ? ' <span style="color:var(--err);font-size:var(--t-xs)">' + String(d.keep_awake.last_err).slice(0, 120) + '</span>' : '')
+              : ''}
+          </div>
+        </div>
+        <div class="setting-input">
+          <label class="check-item" style="padding-left:0">
+            <input type="checkbox" id="set-keep-awake" data-act="keep-awake"
+                   ${s.keep_awake ? 'checked' : ''}>
+            <span class="check-title" style="font-size:var(--t-sm)">启用防休眠</span>
+            <span class="check-sub">${d.keep_awake && d.keep_awake.active ? '生效中' : '已关闭'}</span>
+          </label>
+        </div>
       </div>
     </div>
   </div>`;
@@ -691,7 +724,19 @@ function collectSettings() {
     video_max_rounds: parseInt(($('#set-rounds') || {}).value || '2', 10),
     skip_job_types: skip,
     video_only_course_ids: videoOnly.split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
+    keep_awake: !!($('#set-keep-awake') || {}).checked,
   };
+}
+
+/* 防休眠开关：客户端本地行为，改完立即生效，不用重启后端 */
+async function toggleKeepAwake(el) {
+  const on = !!el.checked;
+  const r = await api('/api/settings', { method: 'POST', body: { keep_awake: on } });
+  toast(on ? '已开启防休眠（立即生效）' : '已关闭防休眠', r.ok ? 'ok' : 'err');
+  if (!r.ok) el.checked = !on;
+  const sub = el.parentElement && el.parentElement.querySelector('.check-sub');
+  if (sub) sub.textContent = on ? '生效中' : '已关闭';
+  poll();
 }
 
 async function doSaveSettings(restart) {
@@ -742,6 +787,9 @@ document.addEventListener('change', (e) => {
     const id = el.dataset.id;
     if (el.checked) S.enroll.picked.add(id); else S.enroll.picked.delete(id);
     render();
+  }
+  if (el.dataset && el.dataset.act === 'keep-awake') {
+    toggleKeepAwake(el);
   }
   if (el.id === 'log-only-err') { S.logOnlyErr = el.checked; renderLogs(S.data, false); }
   if (el.id === 'log-auto') { S.logAutoScroll = el.checked; }

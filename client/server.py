@@ -61,7 +61,106 @@ DEFAULT_SETTINGS = {
     "video_max_rounds": 2,
     "skip_job_types": ["workid"],
     "video_only_course_ids": [],
+    "keep_awake": True,
 }
+
+# ------------------------------------------------------------------ 防休眠
+# 刷课要跑很久，Windows 默认 15~30 分钟无操作就睡眠，一睡超星的上报就断了
+# （视频进度停在原地，甚至被判定异常）。所以客户端运行期间持续调用
+# SetThreadExecutionState 告诉系统「我在干活，别睡」。
+#
+# 标志含义：
+#   ES_CONTINUOUS          让后面两个标志持续生效（而不是只生效一次）
+#   ES_SYSTEM_REQUIRED     阻止系统休眠（最关键）
+#   ES_AWAYMODE_REQUIRED   进入「离开模式」：屏幕照样关，但系统不算睡眠、
+#                          音频继续播 —— 省电和不误事兼得
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+ES_AWAYMODE_REQUIRED = 0x00000040
+_AWAKE_FLAGS = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
+_AWAKE_RESET = ES_CONTINUOUS
+
+_KEEP_AWAKE = {"supported": False, "active": False, "last_err": None}
+
+
+def _set_execution_state(flags):
+    """调用 SetThreadExecutionState；非 Windows 或缺 ctypes 时静默失败。"""
+    try:
+        import ctypes
+        prev = ctypes.windll.kernel32.SetThreadExecutionState(flags)
+        return int(prev)
+    except Exception as exc:  # 非 Windows / pythonw 无权限 都不影响主流程
+        _KEEP_AWAKE["last_err"] = str(exc)
+        return 0
+
+
+def keep_awake_supported():
+    if not _KEEP_AWAKE["supported"]:
+        _KEEP_AWAKE["supported"] = bool(
+            sys.platform.startswith("win")
+            and _set_execution_state(_AWAKE_RESET))
+    return _KEEP_AWAKE["supported"]
+
+
+def keep_awake_loop():
+    """后台守护：查开关每 1 秒、续期每 25 秒。
+
+    SetThreadExecutionState 的标志是「持续」型，重复调用只是保险，防止别的
+    程序把系统状态改回去。查开关和续期分开跑，是为了界面关掉开关后最多 1 秒
+    就生效，不用干等 25 秒。active 反映最近一次调用的真实成败（返回 0 = 失败）。
+    """
+    last_on = None
+    last_refresh = 0.0
+    while True:
+        try:
+            on = bool(SETTINGS.data.get("keep_awake", True))
+        except Exception:
+            on = False
+        if on and not keep_awake_supported():
+            on = False
+        if on != last_on:
+            if on:
+                _KEEP_AWAKE["active"] = bool(_set_execution_state(_AWAKE_FLAGS))
+            else:
+                _set_execution_state(_AWAKE_RESET)
+                _KEEP_AWAKE["active"] = False
+            last_on = on
+            last_refresh = time.time()
+        elif on and time.time() - last_refresh >= 25:
+            _KEEP_AWAKE["active"] = bool(_set_execution_state(_AWAKE_FLAGS))
+            last_refresh = time.time()
+        time.sleep(1)
+
+
+_KEEP_AWAKE_STARTED = False
+
+
+def start_keep_awake_thread():
+    """把 keep_awake_loop 拉起来（幂等，哪里启动都能调）。
+
+    server.py 有两种入口：`python server.py` 直接跑（走 main()），以及被
+    desktop.py import 后由它自己起 HTTP 服务。桌面窗口模式**不会**调用
+    main()，所以守护线程必须在 import 时启动，否则桌面模式下防休眠完全不
+    生效（界面显示"不支持"，因为 supported 永远是初始值 False）。
+    """
+    global _KEEP_AWAKE_STARTED
+    if _KEEP_AWAKE_STARTED:
+        return True
+    try:
+        threading.Thread(target=keep_awake_loop, daemon=True,
+                         name="keep-awake").start()
+        _KEEP_AWAKE_STARTED = True
+        return True
+    except Exception:
+        return False
+
+
+if sys.platform.startswith("win"):
+    try:
+        start_keep_awake_thread()
+    except Exception:
+        pass
+
 
 # ANSI 转义序列。Spring Boot 的彩色输出重定向到文件后 ESC 字节会丢，
 # 只剩 "[1;32m" 这种纯文本，所以要按无 ESC 的形式也匹配一次。
@@ -278,6 +377,8 @@ class Settings:
             self.data["video_max_rounds"] = max(1, min(5, int(self.data["video_max_rounds"])))
             self.data["skip_job_types"] = [str(x) for x in self.data["skip_job_types"] if str(x).strip()]
             self.data["video_only_course_ids"] = [str(x) for x in self.data["video_only_course_ids"] if str(x).strip()]
+            if not isinstance(self.data.get("keep_awake"), bool):
+                self.data["keep_awake"] = bool(self.data.get("keep_awake"))
         except Exception:
             pass
         tmp = self.path + ".tmp"
@@ -753,6 +854,12 @@ def build_state():
         "live": [],
         "logs": [],
         "settings": SETTINGS.data,
+        "keep_awake": {
+            "enabled": bool(SETTINGS.data.get("keep_awake", True)),
+            "active": bool(_KEEP_AWAKE["active"]),
+            "supported": bool(_KEEP_AWAKE["supported"]),
+            "last_err": _KEEP_AWAKE.get("last_err"),
+        },
     }
 
     if mysql_up:
@@ -1090,6 +1197,9 @@ def main():
         except Exception:
             pass
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # 防休眠守护线程：读 SETTINGS.data 的实时值，界面改开关立即生效
+    # （模块导入时通常已启动过，这里是幂等兜底）
+    start_keep_awake_thread()
     print("[SuperAutoStudy] client service on http://127.0.0.1:{}".format(port))
     print("[SuperAutoStudy] root = {}".format(ROOT))
     try:
