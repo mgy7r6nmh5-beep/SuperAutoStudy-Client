@@ -326,6 +326,52 @@ def tail_lines(path, n=LOG_TAIL_LINES, max_bytes=LOG_TAIL_BYTES):
     return [ANSI_RE.sub("", ln) for ln in lines[-n:]]
 
 
+# ------------------------------------------------------------------ 日志增量读
+#
+# 老实现每次轮询都重读日志末尾 300 行，靠 LiveTracker 的 _seen 集合按
+# 「整行字符串」去重。这个去重有个致命歧义：**同一个视频被重复学习时**
+# （第一遍没计分重来 / 重复任务点 / 轮次重放），第二批「播放位置」日志行和
+# 第一批逐字节相同（线程名、任务名、位置、遍数、第几报全都一样），于是全部
+# 被当成重复行丢弃 —— 卡片的位置停在第一次的值不动，最终 300 秒过期消失，
+# 表现为「池子在刷课但界面只有一张卡」。
+#
+# 改成按字节偏移增量读：每行只会被处理一次，与内容是否重复无关。
+_LOG_READ_LOCK = threading.Lock()
+_LOG_OFFSET = {"pos": 0}
+
+
+def read_log_incremental(path):
+    """只返回自上次调用以来新增的日志行（按字节偏移，不做内容去重）。"""
+    with _LOG_READ_LOCK:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return []
+        start = _LOG_OFFSET["pos"]
+        if size < start:                       # 日志被截断/轮转：从头读
+            start = 0
+        elif start == 0 and size > LOG_TAIL_BYTES:
+            start = size - LOG_TAIL_BYTES      # 首读只取尾部，避免全量重放
+        if size <= start:
+            return []
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                data = f.read()
+        except OSError:
+            return []
+        end = start + len(data)
+        if data and not data.endswith(b"\n"):
+            cut = data.rfind(b"\n")            # 末行可能只写了一半，退回完整行
+            if cut < 0:
+                return []
+            data = data[:cut + 1]
+            end = start + len(data)
+        _LOG_OFFSET["pos"] = end
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        return [ANSI_RE.sub("", ln) for ln in lines if ln.strip()]
+
+
 def http_json(url, payload=None, method=None, timeout=30):
     """调后端 JSON 接口。"""
     data = None
@@ -716,16 +762,19 @@ class LiveTracker:
     DONE_RE = re.compile(r"(priority-pool-\d+)(视频已计分|视频未计分|视频被超星风控拦截): (.*?)[（(]")
     POS_RE = re.compile(
         r"(priority-pool-\d+)播放位置: (.*?) (\d+)s/(\d+)s (?:第)?(\d+)遍 第(\d+)报")
+    # 任意提及某线程的行（含 [skip] 跳过测验、异常栈等）——用于刷新存活时间，
+    # 让卡片在「视频之间翻页 / 跳过章节测验」的阶段继续可见。
+    ANY_THREAD_RE = re.compile(r"priority-pool-\d+")
 
     def __init__(self):
         self.active = {}     # thread -> dict
         self.recent = []     # 最近完成的视频
-        self._seen = set()   # 已处理过的行（避免重复计数）
 
     def feed(self, lines):
         for ln in lines:
-            if ln in self._seen:
-                continue
+            tm = self.ANY_THREAD_RE.search(ln)
+            if tm and tm.group(0) in self.active:
+                self.active[tm.group(0)]["last_seen"] = time.time()
             m = self.POS_RE.search(ln)
             if m:
                 thread, job = m.group(1), m.group(2)
@@ -742,7 +791,6 @@ class LiveTracker:
                 v["reports"] = int(m.group(6))
                 v["pos_at"] = time.time()
                 v["last_seen"] = time.time()
-                self._seen.add(ln)
                 continue
             m = self.START_RE.search(ln)
             if m:
@@ -755,7 +803,6 @@ class LiveTracker:
                     "duration": dur, "started": started,
                     "last_seen": time.time(),
                 }
-                self._seen.add(ln)
                 continue
             m = self.DONE_RE.search(ln)
             if m:
@@ -769,10 +816,6 @@ class LiveTracker:
                     "at": time.time(),
                 })
                 self.recent = self.recent[-30:]
-                self._seen.add(ln)
-        # _seen 会无限增长，定期裁剪
-        if len(self._seen) > 5000:
-            self._seen = set(list(self._seen)[-1500:])
 
     def snapshot(self):
         now = time.time()
@@ -920,10 +963,10 @@ def build_state():
 
     # 日志 + 直播跟踪
     log_path = SVC.log_path()
-    lines = tail_lines(log_path)
-    state["logs"] = lines
-    if lines:
-        TRACKER.feed(lines)
+    state["logs"] = tail_lines(log_path)            # 界面日志视图：尾部 300 行
+    fresh = read_log_incremental(log_path)          # tracker：只喂新增的行
+    if fresh:
+        TRACKER.feed(fresh)
     state["live"] = TRACKER.snapshot()
     state["recentVideos"] = TRACKER.recent[-12:]
 
