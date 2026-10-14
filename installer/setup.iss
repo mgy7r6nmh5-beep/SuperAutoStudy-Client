@@ -11,7 +11,7 @@
 ; ============================================================
 
 #define MyAppName "SuperAutoStudy"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "SuperAutoStudy"
 #define MyAppExeName "launch.cmd"
 
@@ -29,7 +29,7 @@ AllowNoIcons=yes
 ; Install per-user, no admin prompt needed.
 PrivilegesRequired=lowest
 OutputDir=.
-OutputBaseFilename=SuperAutoStudy-Setup-1.0
+OutputBaseFilename=SuperAutoStudy-Setup-1.0.1
 SetupIconFile=SuperAutoStudy\app.ico
 Compression=lzma2/max
 SolidCompression=yes
