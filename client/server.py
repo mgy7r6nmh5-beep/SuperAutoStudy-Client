@@ -640,6 +640,7 @@ class LiveTracker:
                 v["round"] = int(m.group(5))
                 v["reports"] = int(m.group(6))
                 v["pos_at"] = time.time()
+                v["last_seen"] = time.time()
                 self._seen.add(ln)
                 continue
             m = self.START_RE.search(ln)
@@ -651,6 +652,7 @@ class LiveTracker:
                 self.active[thread] = {
                     "thread": thread, "course": course, "job": job,
                     "duration": dur, "started": started,
+                    "last_seen": time.time(),
                 }
                 self._seen.add(ln)
                 continue
@@ -681,6 +683,13 @@ class LiveTracker:
             n_threads = 1
         out = []
         for v in self.active.values():
+            # 某个池不再产日志时（后端重启、线程崩了、课程跑完被回收），条目
+            # 会永远留在 active 里 —— 表现为一张永不消失的「正在播放」幽灵卡片
+            # （曾见 priority-pool-3 elapsed=50200s）。这里按最后一次见到该线程
+            # 日志的时间过期：正常每 core_size×paceMs 秒必有上报，留 5 分钟足够，
+            # 远大于最慢的 10×60s，不会误杀真正在跑的池。
+            if now - v.get("last_seen", v.get("started", now)) > 300:
+                continue
             dur = v["duration"] or 0
             elapsed = max(0.0, now - v["started"])
             pos = v.get("position")
