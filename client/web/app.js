@@ -79,7 +79,9 @@ async function poll() {
       // 首次拿到数据时任何视图都要重绘（否则直接落在 #settings 会一直显示「正在连接」）；
       // 之后只有总览/课程随轮询重绘，设置/选课/日志保留用户输入与滚动位置。
       if (first || S.view === 'overview' || S.view === 'courses') render();
+      // 日志 / 设置保留用户的输入、勾选与滚动位，只做局部刷新
       else if (S.view === 'logs') renderLogs(d, true);
+      else if (S.view === 'settings') renderUpdate(d);
     }
   } catch (e) {
     /* 服务刚起/刚停时会失败，忽略 */
@@ -120,6 +122,7 @@ function render() {
   else if (S.view === 'logs') v.innerHTML = viewLogsShell(d);
 
   if (S.view === 'logs') renderLogs(d, false);
+  if (S.view === 'settings') renderUpdate(d);
   if (S.view === 'enroll') ensureEnrollCourses(d);
 }
 
@@ -462,6 +465,14 @@ function viewSettings(d) {
         </div>
       </div>
     </div>
+
+    <div class="panel" style="margin-top:var(--s4)">
+      <div class="panel-head">
+        <span class="panel-title">版本与更新</span>
+        <span class="hint">旧文件备份在 <span class="mono">_update_backup_*</span> 目录，出错可回退</span>
+      </div>
+      <div id="update-body"></div>
+    </div>
   </div>`;
 }
 
@@ -520,6 +531,120 @@ function renderLogs(d, incremental) {
   }).join('');
 
   if (S.logAutoScroll && (atBottom || !incremental)) box.scrollTop = box.scrollHeight;
+}
+
+/* ---------------- 版本与更新 ----------------
+   设置页不随轮询整体重绘（要保留用户输入），所以这里单独刷新：
+   viewSettings 只画外壳 <div id="update-body">，内容每次 poll 由 renderUpdate 重画。 */
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
+function fmtAgo(ts) {
+  if (!ts) return '';
+  const s = Math.max(0, Math.round(Date.now() / 1000 - Number(ts)));
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+
+function renderUpdate(d) {
+  const box = $('#update-body');
+  if (!box) return;
+  const u = d.update || {};
+  const info = u.info || null;
+  const prog = u.progress || null;
+
+  // updater.py 缺失/挂了：更新模块没加载，只能引导去发布页手动下载
+  if (!u.available) {
+    box.innerHTML = `<div class="update-msg err">更新模块未加载（${esc(u.reason || '未知原因')}），
+      请到 GitHub Releases 页面手动下载安装包。</div>`;
+    return;
+  }
+
+  let html = `<div class="setting-row">
+    <div>
+      <div class="setting-name">当前版本 <span class="mono">v${esc(u.current || '?')}</span></div>
+      <div class="setting-desc">
+        更新来源 <span class="mono">${esc((info && info.repo) || 'GitHub')}</span>${
+          u.last_check ? ' · 上次检查 ' + esc(fmtAgo(u.last_check)) : ' · 尚未检查'}
+      </div>
+    </div>
+    <div class="setting-input" style="align-items:flex-end">
+      <button class="btn" data-act="update-check"
+              ${(u.checking || u.applying) ? 'disabled' : ''}>${
+                u.checking ? '检查中…' : '检查更新'}</button>
+    </div>
+  </div>`;
+
+  // ---- 状态行 ----
+  if (u.checking) {
+    html += `<div class="update-msg">正在检查更新…</div>`;
+  } else if (u.applying) {
+    html += `<div class="update-msg warn">正在更新，客户端会自动重启，请勿关闭窗口…</div>`;
+  } else if (u.error) {
+    html += `<div class="update-msg err">${esc(u.error)}</div>`;
+  } else if (info && info.has_update) {
+    html += `<div class="update-msg accent">发现新版本 <b class="mono">v${esc(info.latest)}</b>${
+      info.published ? '（发布于 ' + esc(String(info.published).slice(0, 10)) + '）' : ''}</div>`;
+  } else if (info && info.same_version) {
+    html += `<div class="update-msg ok">已是最新版本 <span class="mono">v${esc(info.latest)}</span></div>`;
+  } else if (info) {
+    html += `<div class="update-msg">当前版本比发布页上的最新版（<span class="mono">v${
+      esc(info.latest)}</span>）还新</div>`;
+  }
+
+  // ---- 新版本说明 ----
+  if (info && info.has_update && info.notes && String(info.notes).trim()) {
+    html += `<div class="update-notes">
+      <div class="update-notes-head">v${esc(info.latest)} 更新内容</div>
+      <div class="update-notes-body">${esc(String(info.notes).trim())}</div>
+    </div>`;
+  }
+
+  // ---- 更新按钮（有新版且没在更新中才给） ----
+  if (info && info.has_update && !u.applying && !u.checking) {
+    html += `<div class="update-actions">`;
+    if (info.client_asset) {
+      html += `<button class="btn btn-primary" data-act="update-apply" data-mode="client"
+        title="只替换客户端代码文件，后端与正在刷的课不受影响">
+        更新客户端（约 ${esc(fmtBytes(info.client_asset.size))}）</button>`;
+    }
+    if (info.setup_asset) {
+      html += `<button class="btn" data-act="update-apply" data-mode="full"
+        title="完整安装包，安装期间刷课会暂停约一分钟">
+        完整安装包（约 ${esc(fmtBytes(info.setup_asset.size))}）</button>`;
+    }
+    if (!info.client_asset && !info.setup_asset) {
+      html += `<a class="btn" href="https://github.com/${esc(info.repo)}/releases/latest"
+        target="_blank" rel="noreferrer">打开发布页手动下载</a>`;
+    }
+    html += `</div>
+    <div class="update-hint">
+      「更新客户端」只覆盖 client/ 下的代码，后端 jar 和正在刷的课完全不受影响；
+      「完整安装包」会更新全部组件，安装过程中刷课暂停约一分钟，装完回界面点「启动服务」即可。
+    </div>`;
+  }
+
+  // ---- 进度条 ----
+  if (prog && prog.phase) {
+    const pct = prog.total > 0 ? Math.min(100, prog.done / prog.total * 100) : 0;
+    const detail = prog.total > 0
+      ? `${esc(fmtBytes(prog.done))} / ${esc(fmtBytes(prog.total))}（${pct.toFixed(0)}%）`
+      : (prog.done ? esc(fmtBytes(prog.done)) : '');
+    html += `<div class="update-progress">
+      <div class="bar${prog.total > 0 ? '' : ' indet'}"><i style="width:${
+        prog.total > 0 ? pct.toFixed(1) : 35}%"></i></div>
+      <div class="update-progress-text"><b>${esc(prog.phase)}</b>${detail ? ' · ' + detail : ''}</div>
+    </div>`;
+  }
+
+  box.innerHTML = html;
 }
 
 /* ---------------- 任务点详情 ---------------- */
@@ -758,6 +883,26 @@ async function doSaveSettings(restart) {
   poll();
 }
 
+/* ---------------- 在线更新 ---------------- */
+async function doUpdateCheck() {
+  const r = await api('/api/update/check?force=1');
+  if (r && r.ok) toast('检查更新完成', 'ok');
+  else toast('检查失败：' + ((r && r.error) || '网络错误'), 'err');
+  poll();
+}
+
+async function doUpdateApply(mode) {
+  const desc = mode === 'client'
+    ? '只更新客户端代码（几百 KB），后端和正在刷的课不受影响'
+    : '下载完整安装包并覆盖安装（百 MB 级），安装期间刷课会暂停约一分钟';
+  if (!confirm('确定现在安装更新吗？\n\n' + desc +
+               '\n\n下载并校验通过后，客户端会自动重启。')) return;
+  const r = await api('/api/update/apply', { method: 'POST', body: { mode: mode } });
+  if (r && r.ok) toast('更新已开始，正在下载…', 'ok');
+  else toast('启动更新失败：' + ((r && r.error) || '未知错误'), 'err');
+  poll();
+}
+
 /* ---------------- 事件 ---------------- */
 document.addEventListener('click', async (e) => {
   const tab = e.target.closest('.tab');
@@ -782,6 +927,8 @@ document.addEventListener('click', async (e) => {
   if (act === 'enroll') return doEnroll();
   if (act === 'save-settings') return doSaveSettings(false);
   if (act === 'restart-backend') return doSaveSettings(true);
+  if (act === 'update-check') return doUpdateCheck();
+  if (act === 'update-apply') return doUpdateApply(el.dataset.mode);
 });
 
 document.addEventListener('change', (e) => {

@@ -861,6 +861,37 @@ class LiveTracker:
 TRACKER = LiveTracker()
 
 
+# ------------------------------------------------------------------ OTA 自更新
+
+try:
+    import updater as _updater_mod
+    UPDATER = _updater_mod.Updater(lambda: SETTINGS, ROOT)
+except Exception:                     # updater 挂了不能影响主程序
+    UPDATER = None
+
+try:
+    if UPDATER is not None:
+        _updater_mod.start_auto_check(UPDATER)
+except Exception:
+    pass
+
+
+def update_public_state():
+    """给 /api/state 用的更新状态（不含内部对象）。"""
+    if UPDATER is None:
+        return {"available": False, "reason": "updater 未加载"}
+    with UPDATER._lock:
+        st = dict(UPDATER.state)
+        st["available"] = True
+        st.pop("log", None)
+        info = st.get("info")
+        if info:                        # 前端只需要这些字段
+            st["info"] = {k: info.get(k) for k in
+                          ("tag", "latest", "has_update", "same_version",
+                           "published", "notes", "client_asset", "setup_asset")}
+        return st
+
+
 # ------------------------------------------------------------------ API
 
 
@@ -969,6 +1000,9 @@ def build_state():
         TRACKER.feed(fresh)
     state["live"] = TRACKER.snapshot()
     state["recentVideos"] = TRACKER.recent[-12:]
+
+    # OTA 自更新状态（当前版本 / 是否有新版本 / 更新进度）
+    state["update"] = update_public_state()
 
     return state
 
@@ -1101,6 +1135,17 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._json({"ok": False, "error": str(exc)})
 
+        if p == "/api/update/check":
+            if UPDATER is None:
+                return self._json({"ok": False, "error": "updater 未加载"})
+            qs = parse_qs(urlparse(self.path).query)
+            force = (qs.get("force") or [""])[0] in ("1", "true")
+            try:
+                info = UPDATER.check(force=force)
+                return self._json({"ok": True, "info": info})
+            except Exception as exc:
+                return self._json({"ok": False, "error": str(exc)})
+
         return self._json({"ok": False, "error": "not found"}, 404)
 
     # ---- POST
@@ -1213,6 +1258,27 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/settings":
             return self._json({"ok": True, "settings": SETTINGS.save(body)})
+
+        if p == "/api/update/apply":
+            if UPDATER is None:
+                return self._json({"ok": False, "error": "updater 未加载"})
+            mode = (body.get("mode") or "").strip()
+            if mode not in ("client", "full"):
+                return self._json({"ok": False, "error": "mode 必须是 client 或 full"})
+            asset_url = (body.get("asset_url") or "").strip()
+            asset_sha256 = (body.get("asset_sha256") or "").strip()
+            if (asset_url and not asset_url.lower().startswith(("http://", "https://"))):
+                return self._json({"ok": False, "error": "asset_url 只支持 http(s)"})
+            if asset_url and not asset_sha256:
+                return self._json({"ok": False, "error": "自定义 asset_url 必须同时提供 asset_sha256"})
+            # 更新过程可能长达数分钟且结尾会重启进程，放后台线程，请求立即返回
+            def run():
+                try:
+                    UPDATER.apply(mode, asset_url, asset_sha256)
+                except Exception:
+                    pass          # 错误已写进 UPDATER.state，前端轮询能看到
+            threading.Thread(target=run, daemon=True, name="ota-apply").start()
+            return self._json({"ok": True, "started": True})
 
         return self._json({"ok": False, "error": "not found"}, 404)
 

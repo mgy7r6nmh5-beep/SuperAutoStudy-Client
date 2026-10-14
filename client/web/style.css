@@ -140,6 +140,51 @@ body {
 .chapter-head .setting-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn-sm { padding: 3px 9px; font-size: var(--t-xs); }
 
+/* ---------------- 版本与更新 ---------------- */
+.update-msg {
+  font-size: var(--t-sm); color: var(--fg-1);
+  padding: var(--s2) 0; border-top: 1px solid var(--line);
+}
+.update-msg.ok { color: var(--ok); }
+.update-msg.err { color: var(--err); }
+.update-msg.warn { color: var(--warn); }
+.update-msg.accent { color: var(--accent); }
+
+.update-notes {
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--bg-2); margin-top: var(--s3);
+  min-width: 0;
+}
+.update-notes-head {
+  font-size: var(--t-sm); color: var(--fg-1);
+  padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line);
+}
+.update-notes-body {
+  font-family: var(--font-mono); font-size: var(--t-xs); color: var(--fg-2);
+  line-height: 1.6; padding: var(--s3); max-height: 220px; overflow: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+.update-actions { display: flex; gap: var(--s2); margin-top: var(--s3); flex-wrap: wrap; }
+.update-hint {
+  font-size: var(--t-xs); color: var(--fg-2); line-height: 1.6; margin-top: var(--s2);
+}
+
+.update-progress { margin-top: var(--s3); }
+.update-progress-text {
+  font-size: var(--t-xs); color: var(--fg-1); margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+/* 总大小未知（如分块传输）时的不确定态动画 */
+.update-progress .bar.indet > i {
+  width: 35%;
+  animation: update-slide 1.1s var(--ease) infinite;
+}
+@keyframes update-slide {
+  0% { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+
 /* ---------------- 表单 ---------------- */
 .form-grid { display: grid; gap: var(--s3); }
 .form-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
