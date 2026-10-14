@@ -48,7 +48,11 @@ Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
-Source: "SuperAutoStudy\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Overwrite everything, but keep live database and user settings
+Source: "SuperAutoStudy\*"; Excludes: "mysql57\data\*,client\settings.json"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Release clean initialized datadir only on fresh install
+; (datadir missing). Upgrades fully keep queue, login and params
+Source: "SuperAutoStudy\mysql57\data\*"; DestDir: "{app}\mysql57\data"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: not DirExists(ExpandConstant('{app}\mysql57\data'))
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"
