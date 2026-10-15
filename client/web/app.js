@@ -354,7 +354,7 @@ function viewEnroll(d) {
 
     <div class="hint">
       加入队列是纯本地操作（只写数据库，不碰超星），加完后会自动触发一次队列扫描。
-      「不要做题」等行为由「设置」里的跳过规则控制。
+      工具只负责刷视频，<b>做题 / 章节测验一律跳过</b>（答题功能已移除）。
     </div>
   </div>`;
 }
@@ -362,8 +362,8 @@ function viewEnroll(d) {
 /* ---------------- 设置 ---------------- */
 function viewSettings(d) {
   const s = d.settings;
-  const types = ['workid', 'document', 'read', 'hyperlink'];
-  const typeNames = { workid: '做题 / 章节测验', document: '文档', read: '阅读', hyperlink: '超链接' };
+  const types = ['document', 'read', 'hyperlink'];
+  const typeNames = { document: '文档', read: '阅读', hyperlink: '超链接' };
 
   return `<div class="view-inner">
     <div class="panel">
@@ -406,7 +406,7 @@ function viewSettings(d) {
       <div class="setting-row">
         <div>
           <div class="setting-name">全局跳过的任务点类型</div>
-          <div class="setting-desc">对所有课程生效。勾上「做题 / 章节测验」就是「都不要做题」。</div>
+          <div class="setting-desc">对所有课程生效。<b>做题 / 章节测验（workid）已从工具中移除，始终跳过</b>，不需要在这里勾选。</div>
         </div>
         <div class="setting-input">
           ${types.map(t => `

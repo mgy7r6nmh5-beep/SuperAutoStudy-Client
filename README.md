@@ -163,7 +163,7 @@
 | `video_report_pace_ms` | `60000` | 上报间隔（毫秒）。**不要低于 60000**，否则触发风控 |
 | `core_size` | `3` | 并发池数量。见上一节，**不影响总速度** |
 | `video_max_rounds` | `2` | 单个视频最多刷几遍 |
-| `skip_job_types` | `["workid"]` | 全局跳过的任务点类型（`workid` = 做题 / 章节测验） |
+| `skip_job_types` | `[]` | 全局跳过的任务点类型（`document` / `read` / `hyperlink`）。<br>**`workid`（做题 / 章节测验）已从工具中移除，后端无条件跳过**，不需要写在这里 |
 | `video_only_course_ids` | `[]` | 只刷视频的课程 ID 列表 |
 
 改完点 **「保存并重启后端」** 立即生效。后端启动日志里有一行 `[StudyProperties] 生效配置: ...` 可以直接对照。
@@ -285,7 +285,7 @@ python client/server.py
 
 | 项目 | 作者 | 许可 | 说明 |
 |---|---|---|---|
-| [DuanInnovator/SuperAutoStudy](https://github.com/DuanInnovator/SuperAutoStudy) | [DuanInnovator](https://github.com/DuanInnovator) | **Apache-2.0** | 超星学习通自动刷课后端（Spring Boot + Dubbo），支持多级倍速播放与自动答题 |
+| [DuanInnovator/SuperAutoStudy](https://github.com/DuanInnovator/SuperAutoStudy) | [DuanInnovator](https://github.com/DuanInnovator) | **Apache-2.0** | 超星学习通自动刷课后端（Spring Boot + Dubbo），多级倍速播放（本项目的答题相关代码已移除） |
 
 **许可合规说明**：
 

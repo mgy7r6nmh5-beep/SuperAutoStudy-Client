@@ -492,6 +492,16 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                 for (Job job : jobs) {
                     try {
 
+                        // 答题功能已移除（2026-10-15 用户要求）：做题 / 章节测验 / 作业
+                        // （type=workid）**无条件跳过**，不再有自动作答这条路径 ——
+                        // 不管 skip-job-types 里有没有写 workid、也不管课程是否配了 video-only。
+                        if (JobTypeConstant.QUESTION.equals(job.getType())) {
+                            System.out.println(Thread.currentThread().getName()
+                                    + "[skip]答题功能已移除，跳过[workid]: "
+                                    + readyCourse.getTitle() + " / " + job.getTitle());
+                            continue;
+                        }
+
                         // 跳过规则：
                         //   ① 全局 study.chaoxing.skip-job-types（如 workid = 做题/章节测验）
                         //   ② 命中 video-only-course-ids 的课程只保留 video
@@ -547,7 +557,13 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                                 courseUtil.studyRead(readyCourse, job, jobInfo.get(0), log);
                                 break;
                             case JobTypeConstant.QUESTION:
-                                courseUtil.studyWork(readyCourse, job, jobInfo.get(0), log);
+                                // 2026-10-15 用户要求「删掉答题功能」：工具只负责刷视频，
+                                // 做题 / 章节测验 / 作业 一律跳过 —— 不再有「自动答题」这条路径，
+                                // 无论 skip-job-types 里有没有写 workid。
+                                // 需要完成这些任务点时，由用户自己（或在外部完成）去超星提交。
+                                System.out.println(Thread.currentThread().getName()
+                                        + "[skip]答题功能已移除，跳过[workid]: "
+                                        + readyCourse.getTitle() + " / " + job.getTitle());
                                 break;
                             default:
                                 // FIX(2026-10-11): 老实现静默 break，未知类型（讨论 / 直播 / 测验…）

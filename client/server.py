@@ -59,7 +59,8 @@ DEFAULT_SETTINGS = {
     "video_report_pace_ms": 60000,
     "core_size": 3,
     "video_max_rounds": 2,
-    "skip_job_types": ["workid"],
+    # 做题 / 章节测验（workid）已从工具中移除，后端无条件跳过，不再需要跳过规则
+    "skip_job_types": [],
     "video_only_course_ids": [],
     "keep_awake": True,
 }
@@ -421,7 +422,10 @@ class Settings:
             self.data["video_report_pace_ms"] = max(3000, int(self.data["video_report_pace_ms"]))
             self.data["core_size"] = max(1, min(10, int(self.data["core_size"])))
             self.data["video_max_rounds"] = max(1, min(5, int(self.data["video_max_rounds"])))
-            self.data["skip_job_types"] = [str(x) for x in self.data["skip_job_types"] if str(x).strip()]
+            # workid（做题/章节测验）已从工具中移除：后端无条件跳过，
+            # 老 settings.json 里残留的 workid 在这里顺手清掉，界面上不再出现。
+            self.data["skip_job_types"] = [str(x) for x in self.data["skip_job_types"]
+                                           if str(x).strip() and str(x).strip() != "workid"]
             self.data["video_only_course_ids"] = [str(x) for x in self.data["video_only_course_ids"] if str(x).strip()]
             if not isinstance(self.data.get("keep_awake"), bool):
                 self.data["keep_awake"] = bool(self.data.get("keep_awake"))
