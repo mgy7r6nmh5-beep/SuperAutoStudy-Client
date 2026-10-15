@@ -36,7 +36,7 @@ import zipfile
 
 # 当前客户端版本。每次发布时手动提升，需与 installer/setup.iss 的 MyAppVersion、
 # GitHub Release 的 tag 保持一致（发布流程见 README「发版」一节）。
-CURRENT_VERSION = "1.0.6"
+CURRENT_VERSION = "1.0.7"
 
 DEFAULT_REPO = "mgy7r6nmh5-beep/SuperAutoStudy-Client"
 API_BASE = "https://api.github.com"

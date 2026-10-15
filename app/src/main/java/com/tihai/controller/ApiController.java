@@ -63,6 +63,13 @@ public class ApiController {
     private static final long POINTS_TTL_MS = 5 * 60_000L;
     /** 扫描失败后多久允许重试 */
     private static final long POINTS_ERROR_RETRY_MS = 15_000L;
+    /**
+     * 扫描卡死兜底：一个扫描跑超过这个时长还没结束，就认为它的 worker 已经
+     * 静默死亡（曾出现过 running=true 但线程池 worker 全空闲、st.running 永真，
+     * 之后所有 refresh 都被挡在「扫描中」，界面永久卡住，只能重启后端）。
+     * 到期后允许重新提交，旧线程即使复活也只是写被替换掉的孤儿对象，无害。
+     */
+    private static final long POINTS_STUCK_MS = 10 * 60_000L;
 
     /**
      * 拉任务点的并发度。刻意压到 2：{@code getJobList} 每章要发 1~3 次 cards 请求
@@ -172,21 +179,27 @@ public class ApiController {
         ScanState st = SCANS.get(key);
         if (st != null) {
             if (st.running) {
-                return R.ok().setData(snapshot(st, true, false));
-            }
-            long age = now - st.finishedAt;
-            if (st.error == null && !force && age < POINTS_TTL_MS) {
-                return R.ok().setData(snapshot(st, false, true));
-            }
-            if (st.error != null && !force && age < POINTS_ERROR_RETRY_MS) {
-                return R.ok().setData(snapshot(st, false, false));
+                if (now - st.startedAt <= POINTS_STUCK_MS) {
+                    return R.ok().setData(snapshot(st, true, false));
+                }
+                // 超期未结束 = 卡死，放行到下面的重提交逻辑
+            } else {
+                long age = now - st.finishedAt;
+                if (st.error == null && !force && age < POINTS_TTL_MS) {
+                    return R.ok().setData(snapshot(st, false, true));
+                }
+                if (st.error != null && !force && age < POINTS_ERROR_RETRY_MS) {
+                    return R.ok().setData(snapshot(st, false, false));
+                }
             }
         }
 
-        // 单飞：同一门课同一时刻只跑一个扫描
+        // 单飞：同一门课同一时刻只跑一个扫描（卡死超期的旧扫描允许被顶掉重跑）
         synchronized (SCANS) {
             st = SCANS.get(key);
-            if (st == null || (!st.running && (force || expired(st, now)))) {
+            boolean stuck = st != null && st.running
+                    && now - st.startedAt > POINTS_STUCK_MS;
+            if (st == null || (!st.running && (force || expired(st, now))) || stuck) {
                 st = new ScanState();
                 SCANS.put(key, st);
                 final ScanState target = st;
@@ -317,7 +330,7 @@ public class ApiController {
                     pool.shutdownNow();
                 }
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             st.error = e.getClass().getSimpleName() + ": " + e.getMessage();
         } finally {
             st.running = false;
