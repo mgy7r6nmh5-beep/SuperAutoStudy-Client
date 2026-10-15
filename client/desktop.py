@@ -60,10 +60,15 @@ def main():
     port = svc.CLIENT_PORT
     httpd = None
 
+    reuse = False
     if wait_port(port, timeout=0.4):
-        # 已经有一个实例在跑，直接复用它的服务
-        pass
-    else:
+        # 端口上像是已有实例。但 OTA 更新重启时，这个「实例」很可能是正在退出的
+        # 旧进程（updater 先拉起新客户端，之后自己才 os._exit）。等几秒再探一次：
+        # 端口若消失，说明刚才是僵尸，必须由本进程接管服务，否则 3080 无人监听。
+        time.sleep(3.0)
+        reuse = wait_port(port, timeout=0.6)
+
+    if not reuse:
         try:
             httpd = ThreadingHTTPServer(("127.0.0.1", port), svc.Handler)
         except OSError as exc:

@@ -36,7 +36,7 @@ import zipfile
 
 # 当前客户端版本。每次发布时手动提升，需与 installer/setup.iss 的 MyAppVersion、
 # GitHub Release 的 tag 保持一致（发布流程见 README「发版」一节）。
-CURRENT_VERSION = "1.0.8"
+CURRENT_VERSION = "1.0.9"
 
 DEFAULT_REPO = "mgy7r6nmh5-beep/SuperAutoStudy-Client"
 API_BASE = "https://api.github.com"
@@ -427,7 +427,15 @@ class Updater:
         try:
             flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
                      | subprocess.CREATE_NO_WINDOW)
-            subprocess.Popen(["cmd.exe", "/c", launch], cwd=self.root,
+            # 先让旧实例（本进程）死透、3080 端口释放，再启动新实例。
+            # 若新实例在旧实例还活着时启动，desktop.py 的 wait_port() 会连上旧
+            # 服务，误判「已有实例在跑」而拒绝绑定端口；旧实例随后 os._exit，
+            # 3080 就彻底没人监听 —— 表现为更新后窗口一直连不上、界面卡住。
+            # 延迟只能放在 cmd 侧：本进程马上就 os._exit，没法自己等。
+            # 用 ping 而不是 timeout：timeout 在 stdin 被重定向（DEVNULL）时会
+            # 立刻报错退出，根本起不到延迟作用。
+            cmdline = 'ping -n 4 127.0.0.1 >nul & call "{}"'.format(launch)
+            subprocess.Popen(cmdline, cwd=self.root,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, creationflags=flags,
                              close_fds=True)
@@ -438,7 +446,7 @@ class Updater:
                 self.state["error"] = "拉起 launch.cmd 失败: %s" % exc
                 self._log("重启失败：%s" % self.state["error"])
             return False
-        time.sleep(1.2)
+        time.sleep(0.3)
         os._exit(0)
 
 
