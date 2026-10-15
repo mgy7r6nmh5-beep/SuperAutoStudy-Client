@@ -36,7 +36,7 @@ import zipfile
 
 # 当前客户端版本。每次发布时手动提升，需与 installer/setup.iss 的 MyAppVersion、
 # GitHub Release 的 tag 保持一致（发布流程见 README「发版」一节）。
-CURRENT_VERSION = "1.0.5"
+CURRENT_VERSION = "1.0.6"
 
 DEFAULT_REPO = "mgy7r6nmh5-beep/SuperAutoStudy-Client"
 API_BASE = "https://api.github.com"
@@ -93,12 +93,19 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
-def _download(url, dest, expect_sha256=None, progress=None, timeout=60):
-    """下载到 dest（先写 .part 再原子改名）。给了期望哈希就硬校验，不符即删。"""
+def _download(url, dest, expect_sha256=None, progress=None, timeout=120):
+    """下载到 dest（先写 .part 再原子改名）。给了期望哈希就硬校验，不符即删。
+
+    Accept 头不能省：GitHub 的 API 资产地址不带 `Accept: application/octet-stream`
+    时返回的是 **JSON 元数据**而不是文件本体（哈希对不上，实测踩过）。
+    """
     if not url:
         raise RuntimeError("没有下载地址")
     tmp = dest + ".part"
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    req = urllib.request.Request(url, headers={
+        "User-Agent": USER_AGENT,
+        "Accept": "application/octet-stream",
+    })
     h = hashlib.sha256()
     done = 0
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(tmp, "wb") as f:
@@ -251,24 +258,45 @@ class Updater:
             raise
 
     def _asset_source(self, asset, asset_url, asset_sha256):
-        """确定 (url, sha256, name)。显式传参优先，否则用 release 里的资产。"""
+        """确定 (urls, sha256, name)。显式传参优先，否则用 release 里的资产。
+
+        urls 是候选列表：API 资产地址（需 octet-stream，见 _download）+
+        browser_download_url 兜底 —— 两个 host 不同，防单点抽风。
+        """
         if asset_url:
-            return asset_url, (asset_sha256 or None), (asset or {}).get("name") or "update.bin"
+            return [asset_url], (asset_sha256 or None), \
+                   (asset or {}).get("name") or "update.bin"
         if not asset:
             raise RuntimeError("该版本没有对应的下载资产")
-        url = asset.get("url") or asset.get("browser_download_url")
-        return url, (asset_sha256 or asset.get("digest")), asset.get("name")
+        urls = [u for u in (asset.get("url"), asset.get("browser_download_url")) if u]
+        if not urls:
+            raise RuntimeError("资产没有下载地址")
+        return urls, (asset_sha256 or asset.get("digest")), asset.get("name")
+
+    def _download_asset(self, urls, dest, want, what):
+        """按候选地址依次尝试下载；全部失败才抛错。"""
+        last = None
+        for u in urls:
+            try:
+                return _download(u, dest, want, self._progress_cb)
+            except Exception as exc:
+                last = exc
+                try:
+                    os.remove(dest + ".part")
+                except OSError:
+                    pass
+        raise RuntimeError("下载 %s 失败：%s" % (what, last))
 
     # ---------------- 模式一：客户端补丁 ----------------
 
     def _apply_client_patch(self, asset, asset_url=None, asset_sha256=None):
-        url, want, name = self._asset_source(asset, asset_url, asset_sha256)
+        urls, want, name = self._asset_source(asset, asset_url, asset_sha256)
         self._log("开始更新客户端：%s" % name)
         tmpdir = tempfile.mkdtemp(prefix="sas_client_upd_")
         try:
             zip_path = os.path.join(tmpdir, "client.zip")
             self._set_phase("下载补丁包")
-            _download(url, zip_path, want, self._progress_cb)
+            self._download_asset(urls, zip_path, want, "客户端补丁包")
             self._log("下载完成（%.1f KB）" % (os.path.getsize(zip_path) / 1024))
 
             self._set_phase("校验文件清单")
@@ -333,13 +361,13 @@ class Updater:
     # ---------------- 模式二：完整安装包 ----------------
 
     def _apply_full_setup(self, asset, asset_url=None, asset_sha256=None):
-        url, want, name = self._asset_source(asset, asset_url, asset_sha256)
+        urls, want, name = self._asset_source(asset, asset_url, asset_sha256)
         self._log("开始完整更新：%s" % name)
         tmpdir = tempfile.mkdtemp(prefix="sas_full_upd_")
         try:
             exe = os.path.join(tmpdir, name if name.endswith(".exe") else "setup.exe")
             self._set_phase("下载安装包")
-            _download(url, exe, want, self._progress_cb)
+            self._download_asset(urls, exe, want, "完整安装包")
             self._log("安装包下载完成（%.1f MB）" % (os.path.getsize(exe) / 1048576))
 
             # ---- 交给哨兵进程，然后退出自己 ----
