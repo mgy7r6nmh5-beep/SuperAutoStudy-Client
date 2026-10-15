@@ -36,7 +36,7 @@ import zipfile
 
 # 当前客户端版本。每次发布时手动提升，需与 installer/setup.iss 的 MyAppVersion、
 # GitHub Release 的 tag 保持一致（发布流程见 README「发版」一节）。
-CURRENT_VERSION = "1.0.10"
+CURRENT_VERSION = "1.0.11"
 
 DEFAULT_REPO = "mgy7r6nmh5-beep/SuperAutoStudy-Client"
 API_BASE = "https://api.github.com"
@@ -442,9 +442,11 @@ class Updater:
             flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
                      | subprocess.CREATE_NO_WINDOW)
             # 再让延迟发生在 cmd 侧，给端口释放留出余量。
-            # 用 ping 而不是 timeout：timeout 在 stdin 被重定向（DEVNULL）时会
-            # 立刻报错退出，根本起不到延迟作用。
-            cmdline = 'ping -n 3 127.0.0.1 >nul & call "{}"'.format(launch)
+            # ⚠️ 必须以 "cmd.exe /c" 开头：Popen 传字符串时是直接 CreateProcess，
+            # 不会经过 shell —— 少了 cmd.exe /c，整串会被当作 ping 的参数，
+            # "&" 和 ">nul" 都不会被解析，launch.cmd 根本不会执行（更新完就自动关掉）。
+            # 也不能用 timeout：它在 stdin 被重定向（DEVNULL）时会立刻报错退出，起不到延迟作用。
+            cmdline = 'cmd.exe /c ping -n 3 127.0.0.1 >nul & call "{}"'.format(launch)
             subprocess.Popen(cmdline, cwd=self.root,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, creationflags=flags,
