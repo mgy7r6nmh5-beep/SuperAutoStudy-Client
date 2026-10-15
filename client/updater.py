@@ -36,7 +36,7 @@ import zipfile
 
 # 当前客户端版本。每次发布时手动提升，需与 installer/setup.iss 的 MyAppVersion、
 # GitHub Release 的 tag 保持一致（发布流程见 README「发版」一节）。
-CURRENT_VERSION = "1.0.9"
+CURRENT_VERSION = "1.0.10"
 
 DEFAULT_REPO = "mgy7r6nmh5-beep/SuperAutoStudy-Client"
 API_BASE = "https://api.github.com"
@@ -424,17 +424,27 @@ class Updater:
                 self.state["error"] = "找不到 launch.cmd：%s" % launch
                 self._log("重启失败：%s" % self.state["error"])
             return False
+        # 治本：先把本进程的 HTTP 服务关掉，让 3080 立刻释放。
+        # 这样新实例启动时端口是空的，一定会自己 bind —— 不再靠「等旧进程退出」
+        # 的时序赌博（Popen 慢 + sleep 1.2 有可能超过新实例的等待窗口，
+        # 于是新实例误判「已有实例在跑」而不绑定端口，窗口就卡在 Edge 错误页）。
+        try:
+            import sys as _sys
+            _httpd = getattr(_sys.modules.get("__main__"), "HTTPD", None)
+            if _httpd is not None:
+                _httpd.shutdown()
+                _httpd.server_close()
+                self._log("已关闭本地服务，端口即将释放")
+        except Exception as exc:
+            self._log("关闭本地服务失败（继续重启）：%s" % exc)
+
         try:
             flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
                      | subprocess.CREATE_NO_WINDOW)
-            # 先让旧实例（本进程）死透、3080 端口释放，再启动新实例。
-            # 若新实例在旧实例还活着时启动，desktop.py 的 wait_port() 会连上旧
-            # 服务，误判「已有实例在跑」而拒绝绑定端口；旧实例随后 os._exit，
-            # 3080 就彻底没人监听 —— 表现为更新后窗口一直连不上、界面卡住。
-            # 延迟只能放在 cmd 侧：本进程马上就 os._exit，没法自己等。
+            # 再让延迟发生在 cmd 侧，给端口释放留出余量。
             # 用 ping 而不是 timeout：timeout 在 stdin 被重定向（DEVNULL）时会
             # 立刻报错退出，根本起不到延迟作用。
-            cmdline = 'ping -n 4 127.0.0.1 >nul & call "{}"'.format(launch)
+            cmdline = 'ping -n 3 127.0.0.1 >nul & call "{}"'.format(launch)
             subprocess.Popen(cmdline, cwd=self.root,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, creationflags=flags,

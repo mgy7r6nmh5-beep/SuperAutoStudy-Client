@@ -18,11 +18,17 @@ import socket
 import sys
 import threading
 import time
+import urllib.request
 from http.server import ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
+
+# 模块级：本进程正在使用的 HTTP 服务实例。
+# updater 在 OTA 重启前会主动 shutdown 它，让 3080 立刻释放 —— 这是
+# 「更新后新实例起不来」那个竞态的治本手段（详见 updater.restart_client）。
+HTTPD = None
 
 
 def fatal(title, message):
@@ -48,7 +54,23 @@ def wait_port(port, timeout=12.0):
     return False
 
 
+def http_ok(port, timeout=1.5):
+    """端口上是否有一个「能正常应答」的本地服务。
+
+    只探测 TCP 端口是不够的：OTA 更新重启时，旧实例的端口在退出前一直可连，
+    但它已经不再服务了。真正请求一次接口才能区分「活着的实例」和「将死的僵尸」。
+    """
+    try:
+        with urllib.request.urlopen(
+                "http://127.0.0.1:{}/api/state".format(port), timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except Exception:
+        return False
+
+
 def main():
+    global HTTPD
+
     try:
         import server as svc
     except Exception as exc:  # 依赖缺失 / 语法错误
@@ -62,11 +84,16 @@ def main():
 
     reuse = False
     if wait_port(port, timeout=0.4):
-        # 端口上像是已有实例。但 OTA 更新重启时，这个「实例」很可能是正在退出的
-        # 旧进程（updater 先拉起新客户端，之后自己才 os._exit）。等几秒再探一次：
-        # 端口若消失，说明刚才是僵尸，必须由本进程接管服务，否则 3080 无人监听。
-        time.sleep(3.0)
-        reuse = wait_port(port, timeout=0.6)
+        # 端口上有服务。但 OTA 更新重启时，它可能是「正在退出」的旧实例
+        # （updater 先拉起新客户端，自己稍后才 os._exit）。所以不能看一眼就复用：
+        # 连续做 HTTP 健康检查，只有自始至终都能正常应答，才认定真有实例在跑；
+        # 中途失去响应就说明是僵尸，由本进程接管服务，否则 3080 会彻底没人监听。
+        for _ in range(4):                     # 约 6 秒
+            time.sleep(1.5)
+            if not http_ok(port, 1.5):
+                break
+        else:
+            reuse = True
 
     if not reuse:
         try:
@@ -75,6 +102,7 @@ def main():
             fatal("SuperAutoStudy 启动失败",
                   "本地端口 {} 被占用，且不像是本程序的服务：\n{}".format(port, exc))
             return 1
+        HTTPD = httpd
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         if not wait_port(port):
             fatal("SuperAutoStudy 启动失败", "本地服务没能起来（端口 {}）。".format(port))
