@@ -865,7 +865,13 @@ TRACKER = LiveTracker()
 
 try:
     import updater as _updater_mod
-    UPDATER = _updater_mod.Updater(lambda: SETTINGS, ROOT)
+
+    def _stop_services_for_update():
+        """完整安装 OTA 的前置动作：安装器替换不了被 java/mysqld 锁定的文件。"""
+        SVC.stop_app()
+        SVC.stop_mysql()
+
+    UPDATER = _updater_mod.Updater(lambda: SETTINGS, ROOT, _stop_services_for_update)
 except Exception:                     # updater 挂了不能影响主程序
     UPDATER = None
 

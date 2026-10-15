@@ -12,9 +12,10 @@
   client —— 下载发布页的「客户端补丁包」（约几百 KB，只含 client/ 代码文件），
             备份旧 client/ → 按 manifest 逐个校验并替换 → 重启客户端。
             后端 jar / MySQL / 正在跑的刷课线程完全不受影响。
-  full   —— 下载完整安装包，静默覆盖安装（Inno，AppId 不变所以是原地升级），
-            再重启客户端。安装期间 Windows 重启管理器会关闭占用文件的进程
-            （java / mysqld），刷课会暂停大约一分钟，装完回界面点「启动服务」即可。
+  full   —— 下载完整安装包 → 停掉后端 / MySQL → 拉起 cmd 哨兵执行静默安装
+            （Inno，AppId 不变所以是原地升级）→ 哨兵重启客户端。
+            安装器会连客户端自己（pythonw）一起关掉，所以不能在本进程里
+            等安装器，必须交给哨兵。装完自动重开，回界面点「启动服务」即可。
 
 镜像 / 手动来源：apply 支持传 asset_url + asset_sha256 覆盖默认下载地址，
 便于内网镜像或本地测试（校验哈希这一关无论如何都要过）。
@@ -35,7 +36,7 @@ import zipfile
 
 # 当前客户端版本。每次发布时手动提升，需与 installer/setup.iss 的 MyAppVersion、
 # GitHub Release 的 tag 保持一致（发布流程见 README「发版」一节）。
-CURRENT_VERSION = "1.0.4"
+CURRENT_VERSION = "1.0.5"
 
 DEFAULT_REPO = "mgy7r6nmh5-beep/SuperAutoStudy-Client"
 API_BASE = "https://api.github.com"
@@ -128,9 +129,11 @@ def _download(url, dest, expect_sha256=None, progress=None, timeout=60):
 class Updater:
     """线程安全。check() 可随时调用；apply() 只能在后台线程里跑（结尾会重启进程）。"""
 
-    def __init__(self, settings_getter, root):
+    def __init__(self, settings_getter, root, service_stopper=None):
         self._settings = settings_getter      # callable -> 有 .data  dict 的对象
         self.root = root                      # 部署根目录（含 launch.cmd 的那层）
+        # 完整安装前停掉后端 / MySQL 的回调（server.py 注入）；None = 不停
+        self._service_stopper = service_stopper
         self._lock = threading.RLock()
         self.state = {
             "current": CURRENT_VERSION,
@@ -339,26 +342,41 @@ class Updater:
             _download(url, exe, want, self._progress_cb)
             self._log("安装包下载完成（%.1f MB）" % (os.path.getsize(exe) / 1048576))
 
-            self._set_phase("静默安装")
-            log = os.path.join(tmpdir, "setup.log")
-            # AppId 不变 → 原地覆盖升级；/SP- 跳过「这是升级」的询问；
-            # 安装期间 java/mysqld 会被重启管理器关闭（重启客户端后回界面点启动服务）。
-            proc = subprocess.run(
-                [exe, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
-                 "/LOG=%s" % log],
-                timeout=900, check=False)
-            self._log("安装器退出码 %s" % proc.returncode)
-            if proc.returncode not in (0, 1):
-                raise RuntimeError("安装失败，详见 %s" % log)
+            # ---- 交给哨兵进程，然后退出自己 ----
+            # 安装器要替换 python\pythonw.exe 等文件，Windows 重启管理器会连
+            # 客户端一起关掉。如果在本进程里 subprocess.run 等安装器，等不到
+            # 就没有机会执行「重启客户端」——所以拉起一个 cmd 哨兵
+            # （cmd.exe 在 system32，永不被替换，保证活到最后）后主动退出。
+            launch = os.path.join(self.root, "launch.cmd")
+            if not os.path.isfile(launch):
+                raise RuntimeError("找不到 launch.cmd：%s" % launch)
+            sentinel = os.path.join(self.root, "client", "_update_sentinel.cmd")
+            if not os.path.isfile(sentinel):
+                raise RuntimeError("找不到哨兵脚本：%s" % sentinel)
+
+            # 先停后端 / MySQL：安装器替换不了被 java/mysqld 锁定的文件
+            self._set_phase("停止服务")
+            if self._service_stopper:
+                try:
+                    self._service_stopper()
+                    self._log("后端 / MySQL 已停止")
+                except Exception as exc:
+                    self._log("停止服务失败（继续安装）：%s" % exc)
+
+            log = os.path.join(self.root, "_update_setup.log")
+            self._set_phase("启动安装器")
+            self._log("已交给哨兵进程安装，客户端即将退出并自动重启…")
+            flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                     | subprocess.CREATE_NO_WINDOW)
+            subprocess.Popen(
+                ["cmd.exe", "/c", sentinel, exe, log, launch, tmpdir],
+                cwd=self.root, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=flags, close_fds=True)
+            time.sleep(1.5)        # 给哨兵留一点启动时间
+            os._exit(0)            # 后面的清理/重启都交给哨兵，finally 不执行
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-
-        # 同客户端补丁：安装已完成，重启只是收尾，先复位状态
-        with self._lock:
-            self.state["applying"] = False
-        self._set_phase("重启客户端")
-        self._log("更新完成，正在重启…")
-        self.restart_client()
 
     # ---------------- 下载进度回调 ----------------
 
