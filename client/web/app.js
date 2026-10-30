@@ -354,7 +354,7 @@ function viewEnroll(d) {
 
     <div class="hint">
       加入队列是纯本地操作（只写数据库，不碰超星），加完后会自动触发一次队列扫描。
-      工具只负责刷视频，<b>做题 / 章节测验一律跳过</b>（答题功能已移除）。
+      工具只处理视频、文档、阅读和超链接，其他任务点类型一律跳过。
     </div>
   </div>`;
 }
@@ -405,8 +405,25 @@ function viewSettings(d) {
 
       <div class="setting-row">
         <div>
+          <div class="setting-name">视频断点续播</div>
+          <div class="setting-desc">
+            开启后，视频从上次播到的位置接着上报，不再每次从头播一遍。<br>
+            <b>中途起报有可能被超星判成「跳播」触发风控</b>，刷不动时先把它关掉。
+          </div>
+        </div>
+        <div class="setting-input">
+          <label class="check-item" style="padding-left:0">
+            <input type="checkbox" id="set-resume-video" ${s.resume_video ? 'checked' : ''}>
+            <span class="check-title" style="font-size:var(--t-sm)">从中断处续播</span>
+            <span class="check-sub">${s.resume_video ? '已开启' : '已关闭（默认）'}</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="setting-row">
+        <div>
           <div class="setting-name">全局跳过的任务点类型</div>
-          <div class="setting-desc">对所有课程生效。<b>做题 / 章节测验（workid）已从工具中移除，始终跳过</b>，不需要在这里勾选。</div>
+          <div class="setting-desc">对所有课程生效。勾选后这类任务点直接跳过，不消耗刷课时间。</div>
         </div>
         <div class="setting-input">
           ${types.map(t => `
@@ -850,6 +867,7 @@ function collectSettings() {
     video_report_pace_ms: parseInt(($('#set-pace') || {}).value || '60000', 10),
     core_size: parseInt(($('#set-core') || {}).value || '3', 10),
     video_max_rounds: parseInt(($('#set-rounds') || {}).value || '2', 10),
+    resume_video: !!($('#set-resume-video') || {}).checked,
     skip_job_types: skip,
     video_only_course_ids: videoOnly.split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
     keep_awake: !!($('#set-keep-awake') || {}).checked,

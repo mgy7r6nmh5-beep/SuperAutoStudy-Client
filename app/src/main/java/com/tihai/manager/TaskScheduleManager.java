@@ -88,8 +88,11 @@ public class TaskScheduleManager {
 
             LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
             wrapper.eq(SuperStarTask::getStatus, WkTaskStatusEnum.ABNORMAL.getCode())
+                    // 加次数上限：否则一门永远刷不动的课会被每 5 分钟捞回来一次，
+                    // 永远空转。到 5 轮就停手，等用户手动「续刷 / 重试」重置额度。
+                    .apply("COALESCE(retry_count, 0) < 5")
                     .set(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode())
-                    .set(SuperStarTask::getRetryCount, 0);
+                    .setSql("retry_count = COALESCE(retry_count, 0) + 1");
             int n = superStarMapper.update(null, wrapper);
             if (n > 0) {
                 taskService.startChaoxingTask();

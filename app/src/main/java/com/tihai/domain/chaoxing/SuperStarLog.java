@@ -53,12 +53,35 @@ public class SuperStarLog {
     private Integer currentChapterIndex;
 
     /**
+     * 当前章节id（不是序号）。
+     *
+     * <p>{@code currentChapterIndex} 存的是「平铺章节列表里的第几个」，超星一旦
+     * 调整章节顺序（新增 / 删除 / 重排），同一个序号就指到别的章去了。
+     * 存 id 才能保证续刷停在真正该停的那一章。
+     *
+     * <p>一轮扫完但课没刷完时，指针会被归零（见 SuperStarTaskServiceImpl 里的
+     * 「顶到末尾就归零」），这时 id 也要一起清掉，否则下一轮又会按 id 找回
+     * 原来的位置。所以同样用 IGNORED 策略，允许写 NULL。
+     */
+    @TableField(updateStrategy = FieldStrategy.IGNORED)
+    private String chapterId;
+
+    /**
+     * 本轮没通过服务端校验的章节id，逗号分隔。
+     *
+     * <p>下一轮优先只重刷这些章，而不是把整门课从第 0 章线性重扫一遍。
+     * 允许被清成 NULL（整轮全部通过时），所以要 IGNORED 策略。
+     */
+    @TableField(updateStrategy = FieldStrategy.IGNORED)
+    private String failedChapters;
+
+    /**
      * 当前进度
      */
     private BigDecimal currentProgress;
 
     /**
-     * 状态  0-待处理，1-进行中，2-队列中，3-考试中，4-已完成，5-异常
+     * 状态  0-待处理，1-进行中，2-队列中，3-历史值(已废弃)，4-已完成，5-异常
      */
     private Integer status;
 

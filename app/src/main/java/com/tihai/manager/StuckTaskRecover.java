@@ -120,13 +120,18 @@ public class StuckTaskRecover implements ApplicationListener<ApplicationReadyEve
     /**
      * ③「异常(5)」是终态，而且没有别的重试入口（重新提交同一门课会被
      * TASK_ALREADY_EXIST 拒掉），所以一并捞回来重试，否则失败的课永远没救。
-     * 同时把 retry_count 归零，给它们一轮完整的新额度。
+     *
+     * <p><b>但要设上限</b>：一门课如果每轮都失败（比如某个任务点超星永远不给过），
+     * 无条件捞回来就变成「每 5 分钟空转一次」，白耗请求还可能把账号打进风控。
+     * 所以用 retry_count 计次，到 5 轮就停手；用户想再来一轮，
+     * 在控制台点「续刷 / 重试」会把 retry_count 清零。
      */
     private int retryAbnormal() {
         LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(SuperStarTask::getStatus, WkTaskStatusEnum.ABNORMAL.getCode())
+                .apply("COALESCE(retry_count, 0) < 5")
                 .set(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode())
-                .set(SuperStarTask::getRetryCount, 0);
+                .setSql("retry_count = COALESCE(retry_count, 0) + 1");
         return superStarMapper.update(null, wrapper);
     }
 }

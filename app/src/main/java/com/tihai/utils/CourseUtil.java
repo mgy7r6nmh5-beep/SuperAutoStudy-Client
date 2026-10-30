@@ -4,6 +4,7 @@ import com.alibaba.nacos.api.exception.NacosException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.tihai.common.*;
 import com.tihai.common.GlobalConst;
+import com.tihai.constant.JobTypeConstant;
 import com.tihai.domain.chaoxing.SuperStarLog;
 import com.tihai.domain.chaoxing.WkUser;
 import com.tihai.dubbo.pojo.course.Course;
@@ -61,9 +62,6 @@ public class CourseUtil {
     @Autowired
     private StudyProperties studyProperties;
 
-    @Autowired
-    private Query query;
-
     public void setAccount(String account) {
         this.account = account;
     }
@@ -92,7 +90,6 @@ public class CourseUtil {
         c.cookieService = this.cookieService;
         c.serverInfoUtil = this.serverInfoUtil;
         c.studyProperties = this.studyProperties;
-        c.query = this.query;
         c.cookies = (this.cookies == null) ? null : new LinkedHashMap<>(this.cookies);
         c.cookieList = new ArrayList<>(this.cookieList);
         c.account = this.account;
@@ -1087,9 +1084,30 @@ public class CourseUtil {
             }
             rounds++;
 
-            // ① 开始播放：isdrag=3, playingTime=0
+            // 断点续播（默认关闭，开关 study.chaoxing.resume-video）。
+            // cards 页本来就返回了 playTime（毫秒），但以前只给只读接口展示用，
+            // 刷课路径一律从 0 开始上报 —— 这就是「视频看到一半、重开又从头上报」的原因。
+            // 超星的 enc 校验要求 playingTime < duration，所以钳在 duration - step 以内。
+            // 只在第一遍生效：第二遍起必须完整播放，服务端才会判 isPassed。
+            long startPt = 0L;
+            if (rounds == 1
+                    && Boolean.TRUE.equals(studyProperties.getResumeVideo())
+                    && job.getPlayTime() != null) {
+                long fromCards = job.getPlayTime() / 1000L;
+                long cap = Math.max(0L, duration - step);
+                startPt = Math.min(Math.max(0L, fromCards), cap);
+                if (startPt > 0) {
+                    System.out.println(Thread.currentThread().getName()
+                            + "断点续播: " + job.getName()
+                            + " 从 " + startPt + "s / " + duration + "s 接着播");
+                }
+            }
+            // 从 0 开始用 isdrag=3（开始播放）；中途起播用 isdrag=2（seek 结束）
+            String firstDrag = startPt > 0 ? "2" : "3";
+
+            // ① 开始播放
             VideoLogResult r = videoProgressLog(session, course, job, jobInfo,
-                    dtoken, duration, 0, "3", type);
+                    dtoken, duration, startPt, firstDrag, type);
             reports++;
             if (r.blocked) {
                 if (lastBlocked == null) {
@@ -1109,7 +1127,7 @@ public class CourseUtil {
             // 这里不再单独 sleep，否则会叠加成两倍间隔。
 
             // ② 播放中：每 step 秒播放进度一条；走到满时长那条用 isdrag=4（播放完毕）
-            long pt = 0;
+            long pt = startPt;
             boolean roundBlocked = false;
             while (pt < duration) {
                 pt = Math.min(pt + step, duration);
@@ -1208,6 +1226,16 @@ public class CourseUtil {
      * @return true 表示服务端确认这个任务点已完成
      */
     public boolean reportJobPoint(Course course, Job job, String type) throws IOException {
+        // ⛔ 硬闸（2026-10-17 用户要求「不准交作业」）：
+        // 任何情况下都不允许对 workid（做题 / 章节测验 / 作业）发起上报或提交。
+        // 即使将来有人改代码把 workid 路由到这里，也会在这一行被拦下。
+        // 这是最后一道防线 —— 不要删除、不要放宽。
+        if (JobTypeConstant.QUESTION.equals(type)) {
+            System.out.println(Thread.currentThread().getName()
+                    + "[BLOCK] 禁止提交作业，已拦截 workid 上报: " + job.getTitle());
+            return false;
+        }
+
         // 上报吃账号额度，风控退避期内别发
         awaitRiskClear("任务点(" + type + "): " + job.getTitle());
 

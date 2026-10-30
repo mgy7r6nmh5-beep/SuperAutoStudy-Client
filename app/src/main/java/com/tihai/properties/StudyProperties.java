@@ -31,7 +31,7 @@ public class StudyProperties {
      * 之后所有上报全被拒（视频进度存下来了但永远不计分）。
      * 实测 3 秒一条时第 4 条就被拦。所以这里必须给足间隔。
      */
-    private Integer videoReportPaceMs = 10000;
+    private Integer videoReportPaceMs = 60000;
 
     /**
      * 视频上报的播放进度步长（秒）。
@@ -43,6 +43,18 @@ public class StudyProperties {
 
     /** 单个视频最多重复「完整播放」几遍。服务端偶尔要第二遍才落分。 */
     private Integer videoMaxRounds = 3;
+
+    /**
+     * 视频断点续播开关（默认关闭）。
+     *
+     * <p>打开后，cards 页返回的 {@code playTime} 会被当作起报点，
+     * 视频不再每次都从 0 重播一遍；首条上报用 {@code isdrag=2}（seek 结束）
+     * 而不是 3（开始播放）。
+     *
+     * <p><b>为什么默认关</b>：中途起报有可能被超星判成「跳播」，
+     * 触发账号级风控（实测 9010 那种）。想省时间再打开，一旦刷不动立刻关掉。
+     */
+    private Boolean resumeVideo = false;
 
     /**
      * 「只刷视频」模式的课程 ID 列表。
@@ -73,6 +85,7 @@ public class StudyProperties {
         System.out.println("[StudyProperties] 生效配置: video-report-pace-ms=" + videoReportPaceMs
                 + " step-seconds=" + videoReportStepSeconds
                 + " max-rounds=" + videoMaxRounds
+                + " resume-video=" + resumeVideo
                 + " skip-job-types=" + skipJobTypes
                 + " video-only-course-ids=" + videoOnlyCourseIds);
     }

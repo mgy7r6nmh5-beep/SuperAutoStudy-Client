@@ -17,6 +17,7 @@
     python desktop.py              # 起服务 + 原生窗口（pywebview）
 """
 
+import io
 import json
 import os
 import re
@@ -47,18 +48,50 @@ CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 FLAGS_HIDDEN = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
 
+# my.ini 的模板。basedir / datadir / log-error 必须按当前部署根目录算，
+# 不能沿用打包机上的路径 —— 之前分发包里带的是写死 C:/Users/<打包者>/... 的 my.ini，
+# 换台机器 mysqld 就找不到 datadir，直接起不来。
+MY_INI_TEMPLATE = """[mysqld]
+basedir={basedir}
+datadir={datadir}
+port={port}
+bind-address={host}
+character-set-server=utf8mb4
+collation-server=utf8mb4_general_ci
+max_connections=200
+max_allowed_packet=64M
+log-error={logerror}
+slow_query_log=0
+log_syslog=0
+default-authentication-plugin=mysql_native_password
+explicit_defaults_for_timestamp=1
+sql_mode=STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+innodb_log_file_size=16M
+innodb_log_files_in_group=2
+
+[client]
+port={port}
+default-character-set=utf8mb4
+
+[mysql]
+default-character-set=utf8mb4
+"""
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 SETTINGS_PATH = os.path.join(BASE_DIR, "settings.json")
 
 # 与 com.tihai.enums.WkTaskStatusEnum 一一对应
-STATUS_TEXT = {0: "待处理", 1: "进行中", 2: "队列中", 3: "考试中",
+# 3 是历史遗留状态，当前代码不再产生，保留映射只为兼容旧数据库里的残留行
+STATUS_TEXT = {0: "待处理", 1: "进行中", 2: "队列中", 3: "已废弃",
                4: "已完成", 5: "异常", 6: "暂停"}
 
 DEFAULT_SETTINGS = {
     "video_report_pace_ms": 60000,
     "core_size": 3,
     "video_max_rounds": 2,
+    # 视频断点续播：从中断处接着上报。中途起报可能被判跳播，所以默认关。
+    "resume_video": False,
     # 做题 / 章节测验（workid）已从工具中移除，后端无条件跳过，不再需要跳过规则
     "skip_job_types": [],
     "video_only_course_ids": [],
@@ -429,6 +462,8 @@ class Settings:
             self.data["video_only_course_ids"] = [str(x) for x in self.data["video_only_course_ids"] if str(x).strip()]
             if not isinstance(self.data.get("keep_awake"), bool):
                 self.data["keep_awake"] = bool(self.data.get("keep_awake"))
+            if not isinstance(self.data.get("resume_video"), bool):
+                self.data["resume_video"] = bool(self.data.get("resume_video"))
         except Exception:
             pass
         tmp = self.path + ".tmp"
@@ -452,6 +487,7 @@ class Settings:
             "--study.chaoxing.video-max-rounds={}".format(d["video_max_rounds"]),
             "--study.chaoxing.skip-job-types={}".format(",".join(d["skip_job_types"])),
             "--study.chaoxing.video-only-course-ids={}".format(",".join(d["video_only_course_ids"])),
+            "--study.chaoxing.resume-video={}".format("true" if d.get("resume_video") else "false"),
         ]
 
 
@@ -519,12 +555,40 @@ class Services:
         return os.path.join(d, jars[-1]) if jars else None
 
     # ---- 启动
+    def ensure_my_ini(self):
+        """确保 my.ini 里的路径指向当前部署目录，返回是否重写过。
+
+        安装包/绿色包里可能带着别人机器上的 my.ini，直接拿去启动 mysqld 会指向
+        一个不存在的 datadir。所以每次启动前核一遍 basedir/datadir，对不上就重写。
+        用户自己改过的其它选项（比如调 max_connections）只要路径是对的就不动。
+        """
+        mysql_dir = os.path.join(self.root, "mysql57")
+        basedir = mysql_dir.replace("\\", "/")
+        datadir = os.path.join(mysql_dir, "data").replace("\\", "/")
+        logerror = os.path.join(mysql_dir, "mysql-error.log").replace("\\", "/")
+
+        try:
+            with io.open(self.myini, "r", encoding="utf-8", errors="replace") as f:
+                old = f.read()
+        except OSError:
+            old = ""
+        if "basedir={}".format(basedir) in old and "datadir={}".format(datadir) in old:
+            return False
+
+        body = MY_INI_TEMPLATE.format(basedir=basedir, datadir=datadir,
+                                      logerror=logerror, port=DB_PORT, host=DB_HOST)
+        with io.open(self.myini, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write(body)
+        return True
+
     def start_mysql(self):
         if port_open(DB_PORT):
             return "already", "MySQL 已在运行"
         if not os.path.exists(self.mysqld):
             return "err", "找不到 {}".format(self.mysqld)
         logpath = os.path.join(self.root, "mysql57", "console.log")
+        if self.ensure_my_ini():
+            print("[my.ini] 路径已按当前目录重写：{}".format(self.root))
         try:
             self._mysql_fh = open(logpath, "ab", buffering=0)
             self.mysql_proc = subprocess.Popen(
@@ -648,6 +712,37 @@ SELECT account, CHAR_LENGTH(COALESCE(cookies, '')) AS cookie_len
         finally:
             conn.close()
 
+    # 老库升级要补的列。实体字段是写死在 Java 里的，库里缺列会直接
+    # "Unknown column"，整门课都跑不起来。所以启动时先对一遍 information_schema。
+    SCHEMA_PATCHES = [
+        ("th_wk_log", "chapter_id",
+         "ALTER TABLE th_wk_log ADD COLUMN chapter_id varchar(64) NULL DEFAULT NULL "
+         "COMMENT '当前章节id（非序号，防章节顺序变化错位）' AFTER current_chapter_index"),
+        ("th_wk_log", "failed_chapters",
+         "ALTER TABLE th_wk_log ADD COLUMN failed_chapters varchar(1024) NULL DEFAULT NULL "
+         "COMMENT '本轮未通过校验的章节id，逗号分隔' AFTER chapter_id"),
+    ]
+
+    def ensure_schema(self):
+        """给老版本升级上来的库补列，已经是新库就什么都不做。返回补了哪些列。"""
+        conn = self.connect()
+        try:
+            added = []
+            with conn.cursor() as cur:
+                for table, column, ddl in self.SCHEMA_PATCHES:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.columns "
+                        "WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+                        (DB_NAME, table, column))
+                    if cur.fetchone()[0]:
+                        continue
+                    cur.execute(ddl)
+                    added.append(column)
+            conn.commit()
+            return added
+        finally:
+            conn.close()
+
     def rescan_queue(self):
         with urllib.request.urlopen(
                 "http://127.0.0.1:{}/chaoxing".format(HTTP_PORT), timeout=15) as resp:
@@ -726,16 +821,23 @@ SELECT account, CHAR_LENGTH(COALESCE(cookies, '')) AS cookie_len
                     if backend_started is None or last is None or last < backend_started:
                         stuck.append(row_id)
 
-                def upd(status, ids):
+                def upd(status, ids, clear_retry=False):
                     if not ids:
                         return 0
+                    if clear_retry:
+                        # 用户手动点「续刷 / 重试」= 重新给一轮完整额度。
+                        # 后端自愈有 5 次上限（见 StuckTaskRecover / TaskScheduleManager），
+                        # 不清零的话刷到上限后就再也跑不动了。
+                        return cur.executemany(
+                            "UPDATE th_wk_queue SET status = %s, retry_count = 0 WHERE id = %s",
+                            [(status, i) for i in ids])
                     return cur.executemany(
                         "UPDATE th_wk_queue SET status = %s WHERE id = %s",
                         [(status, i) for i in ids])
 
                 n_done = upd(4, finished)
-                n_retry = upd(0, failed)
-                n_reset = upd(0, stuck)
+                n_retry = upd(0, failed, clear_retry=True)
+                n_reset = upd(0, stuck, clear_retry=True)
             conn.commit()
             return n_reset, n_retry, n_done
         finally:
@@ -1171,6 +1273,12 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     time.sleep(0.5)
             if not backend_was_running and port_open(DB_PORT):
+                try:
+                    added = SVC.ensure_schema()
+                    if added:
+                        msgs.append("升级数据表: {}".format("/".join(added)))
+                except Exception as exc:
+                    msgs.append("升级数据表失败: {}".format(exc))
                 try:
                     n_reset, n_retry, n_done = SVC.reset_stuck_tasks(None)
                     parts = []

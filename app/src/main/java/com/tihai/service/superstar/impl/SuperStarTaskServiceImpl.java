@@ -93,6 +93,9 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
     private final BlockingQueue<SuperStarLog> logQueue = new LinkedBlockingQueue<>();
     private final ConcurrentHashMap<Long, SuperStarLog> logMap = new ConcurrentHashMap<>();
 
+    // 正在刷的任务 id（进程内去重，防止同一门课被两个线程同时刷）
+    private static final Set<String> RUNNING_TASKS = ConcurrentHashMap.newKeySet();
+
     public SuperStarTaskServiceImpl() throws NacosException {
     }
 
@@ -325,7 +328,16 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
             if (!isUpdated) {
                 continue;   // 已被别的调用认领，跳过，避免重复执行
             }
+            String runKey = task.getId() != null ? task.getId() : task.getCourseName();
             Runnable taskWrapper = new PriorityTaskWrapper(() -> {
+                // 同一门课只许一个线程在刷。实测出现过两个 priority-pool 线程
+                // 同时刷同一门课（日志里同一秒两条「开始学习视频」）——两个线程
+                // 都在写同一条 th_wk_log，章节断点指针互相覆盖，续刷就废了。
+                // 这里按任务 id 在进程内去重，后来者直接退出。
+                if (!RUNNING_TASKS.add(runKey)) {
+                    log.warn("跳过重复任务：{}（已有线程在刷这门课）", task.getCourseName());
+                    return;
+                }
                 try {
                     executeCourseTask(task);
                 } catch (Exception e) {
@@ -336,6 +348,8 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                         task.setStatus(WkTaskStatusEnum.PENDING.getCode());
                     }
                     this.updateById(task);
+                } finally {
+                    RUNNING_TASKS.remove(runKey);
                 }
             }, task.getPriority(), task.getId());
 
@@ -450,18 +464,69 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
             logQueue.offer(log);
         }
 
-        int pointIndex = log.getCurrentChapterIndex() != null ? log.getCurrentChapterIndex() : 0;
-
         List<ChapterPoint> chapterPointList = pointList.get(0).getPoints();
         int totalChapters = chapterPointList.size();
-        // 记录有多少个章节没能通过服务端校验（视频 isPassed 为 false、任务点抛异常等）
-        int failedChapters = 0;
+
+        // 断点位置。优先按上一轮记下的 chapter_id 在新章节表里定位 —— 超星偶尔会
+        // 调整章节顺序，纯按数组下标续刷会跳章或把已刷完的章再刷一遍。
+        // 找不到（章节被删/改名）或者老数据没有 chapter_id 时，退回下标。
+        int pointIndex = log.getCurrentChapterIndex() != null ? log.getCurrentChapterIndex() : 0;
+        String resumeChapterId = log.getChapterId();
+        if (resumeChapterId != null && !resumeChapterId.trim().isEmpty()) {
+            for (int i = 0; i < chapterPointList.size(); i++) {
+                if (resumeChapterId.equals(chapterPointList.get(i).getId())) {
+                    pointIndex = i;
+                    break;
+                }
+            }
+        }
+        if (pointIndex < 0 || pointIndex > chapterPointList.size()) {
+            pointIndex = 0;
+        }
+        if (pointIndex > 0) {
+            System.out.println("续刷课程: " + readyCourse.getTitle()
+                    + " 从第 " + (pointIndex + 1) + "/" + totalChapters + " 章接着刷");
+        }
+        // 本轮没通过服务端校验的章节 id（视频 isPassed 为 false、任务点抛异常等）
+        Set<String> failedChapterIds = new LinkedHashSet<>();
+        // 因为「超星说这章 pending==0」而被跳过的章节。如果最后 getRealProgress
+        // 又说还有 pending，说明那份快照不准，下一轮必须强制重刷它们，
+        // 否则会陷入「跳过 → 仍有 pending → 再跳过」的死循环。
+        Set<String> skippedChapters = new LinkedHashSet<>();
+
+        // 上一轮失败的章节 → 本轮只重刷它们，其余章节直接跳过，不做无效扫描
+        Set<String> retryOnly = parseIdSet(log.getFailedChapters());
+
+        // 一次性拿到「每章还剩几个任务点」（章节id → 剩余数）。
+        // 拉不到就是 null，退化成原来「每章都拉 cards 页」的行为，不影响正确性。
+        Map<String, Integer> chapterPending = courseUtil.getChapterPending(
+                readyCourse.getCourseId(), readyCourse.getClazzId(), readyCourse.getCpi());
 
         while (pointIndex < chapterPointList.size()) {
 
             try {
-                log.setCurrentChapterIndex(pointIndex);
                 ChapterPoint chapterPoint = chapterPointList.get(pointIndex);
+                String chapterId = chapterPoint.getId();
+                log.setCurrentChapterIndex(pointIndex);
+                log.setChapterId(chapterId);
+
+                // ① 上一轮有失败章节：本轮只重刷这些章。
+                //    这一条必须排在 ② 前面 —— 被判失败的章要无条件重新处理，
+                //    不能被「pending==0」的快照挡住。
+                if (!retryOnly.isEmpty() && !retryOnly.contains(chapterId)) {
+                    pointIndex++;
+                    log.setCurrentChapterIndex(pointIndex);
+                    continue;
+                }
+
+                // ② 超星页面上这章已经没有任何待完成任务点 → 跳过，省一次 cards 请求
+                if (chapterPending != null && Integer.valueOf(0).equals(chapterPending.get(chapterId))) {
+                    skippedChapters.add(chapterId);
+                    pointIndex++;
+                    log.setCurrentChapterIndex(pointIndex);
+                    continue;
+                }
+
                 Pair<List<Job>, List<JobInfo>> result = courseUtil.getJobList(
                         readyCourse.getClazzId().toString(),
                         readyCourse.getCourseId(),
@@ -558,7 +623,7 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                                 break;
                             case JobTypeConstant.QUESTION:
                                 // 2026-10-15 用户要求「删掉答题功能」：工具只负责刷视频，
-                                // 做题 / 章节测验 / 作业 一律跳过 —— 不再有「自动答题」这条路径，
+                                // 做题 / 章节测验 / 作业 一律跳过 —— 不存在任何作答/提交路径，
                                 // 无论 skip-job-types 里有没有写 workid。
                                 // 需要完成这些任务点时，由用户自己（或在外部完成）去超星提交。
                                 System.out.println(Thread.currentThread().getName()
@@ -583,7 +648,7 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                     }
                 }
                 if (!chapterOk) {
-                    failedChapters++;
+                    failedChapterIds.add(chapterId);
                 }
                 pointIndex++;
 
@@ -629,6 +694,7 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
 
         log.setEndTime(LocalDateTime.now());
         log.setCurrentChapterIndex(pointIndex);
+        log.setFailedChapters(failedChapterIds.isEmpty() ? null : String.join(",", failedChapterIds));
 
         if (real != null) {
             int total = real.getOrDefault("total", 0);
@@ -639,7 +705,14 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
             int denominator = Math.max(1, total - noTask);
             double realPercent = Math.min(100.0, done * 100.0 / denominator);
 
-            if (pending == 0 && failedChapters == 0) {
+            // 靠「pending==0」跳过的章，如果超星这里又说还有待完成任务点，
+            // 说明那份章节快照过期了 → 记成失败，下一轮强制重刷
+            if (pending > 0 && !skippedChapters.isEmpty()) {
+                failedChapterIds.addAll(skippedChapters);
+                log.setFailedChapters(String.join(",", failedChapterIds));
+            }
+
+            if (pending == 0 && failedChapterIds.isEmpty()) {
                 log.setCurrentProgress(BigDecimal.valueOf(100));
                 log.setErrorMessage(null);
                 log.setStatus(WkTaskStatusEnum.FINISHED.getCode());
@@ -653,7 +726,7 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                         readyCourse.getTitle(), done, total));
                 log.setErrorMessage(String.format(
                         "未刷完：超星仍有 %d 个待完成任务点（已完成 %d/%d 章）；本次 %d 个章节未通过服务端校验",
-                        pending, done, total, failedChapters));
+                        pending, done, total, failedChapterIds.size()));
                 task.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
                 // FIX(2026-10-11)「未刷完却永远重试不了」：
                 // current_chapter_index 是「上次遍历到第几章」的续跑指针，会被持久化。
@@ -667,6 +740,7 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                 // 那是正常的断点续跑。
                 if (pointIndex >= totalChapters) {
                     log.setCurrentChapterIndex(0);
+                    log.setChapterId(null);
                 }
             }
             logQueue.offer(log);
@@ -676,7 +750,7 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
 
         // 拉不到课程页（网络/登录问题）→ 退回本地判断，
         // 且只敢在「确实遍历完 + 没有失败章节」时才宣布完成
-        if (loopFinished && failedChapters == 0) {
+        if (loopFinished && failedChapterIds.isEmpty()) {
             log.setCurrentProgress(BigDecimal.valueOf(100));
             log.setStatus(WkTaskStatusEnum.FINISHED.getCode());
             log.setErrorMessage(null);
@@ -687,14 +761,35 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
             log.setRemark("未完成: " + readyCourse.getTitle());
             log.setErrorMessage(String.format(
                     "未刷完：本地遍历到第 %d/%d 章，其中 %d 个章节未通过服务端校验（且未能回查超星确认）",
-                    pointIndex, totalChapters, failedChapters));
+                    pointIndex, totalChapters, failedChapterIds.size()));
             task.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
             // 同上：顶到末尾但没刷完 → 指针归零，否则下一轮 0 秒扫完、死循环
             if (pointIndex >= totalChapters) {
                 log.setCurrentChapterIndex(0);
+                log.setChapterId(null);
             }
         }
         logQueue.offer(log);
         this.updateById(task);
+    }
+
+    /**
+     * 把「逗号分隔的章节 id」解析成集合。
+     *
+     * <p>数据库里 failed_chapters 用逗号分隔而不是 JSON，是因为章节 id 全是纯数字，
+     * 逗号不可能出现在里面，解析简单，出问题时直接 SELECT 出来就能读。
+     */
+    private static Set<String> parseIdSet(String raw) {
+        Set<String> out = new LinkedHashSet<>();
+        if (raw == null || raw.trim().isEmpty()) {
+            return out;
+        }
+        for (String part : raw.split(",")) {
+            String id = part.trim();
+            if (!id.isEmpty()) {
+                out.add(id);
+            }
+        }
+        return out;
     }
 }

@@ -13,7 +13,7 @@ CREATE TABLE `th_wk_queue`  (
   `course_id` varchar(255) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL COMMENT '课程id',
   `course_name` varchar(255) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL COMMENT '课程名称',
   `priority` int(11) NULL DEFAULT NULL COMMENT '优先级',
-  `status` int(11) NULL DEFAULT NULL COMMENT '0-待处理，1-进行中，2-队列中，3-考试中，4-已完成，5-异常, 6-暂停',
+  `status` int(11) NULL DEFAULT NULL COMMENT '0-待处理，1-进行中，2-队列中，3-历史值(已废弃)，4-已完成，5-异常, 6-暂停',
   `retry_count` int(11) NULL DEFAULT 0 COMMENT '重试次数',
   `creat_time` datetime NULL DEFAULT NULL COMMENT '创建时间',
   `machine_num` varchar(20) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL COMMENT '所处机器编号',
