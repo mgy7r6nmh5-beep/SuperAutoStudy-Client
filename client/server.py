@@ -96,6 +96,10 @@ DEFAULT_SETTINGS = {
     "skip_job_types": [],
     "video_only_course_ids": [],
     "keep_awake": True,
+    # 更新下载镜像。官方 GitHub 优先，只有它失败或者慢到离谱才会走镜像。
+    # 留空 = 用 updater.py 里内置的镜像列表；填 "-" = 只用官方，一个镜像都不碰。
+    # 填前缀或带 {url} 的模板都行，多个用逗号隔开。
+    "update_mirror": "",
 }
 
 # ------------------------------------------------------------------ 防休眠
@@ -464,6 +468,7 @@ class Settings:
                 self.data["keep_awake"] = bool(self.data.get("keep_awake"))
             if not isinstance(self.data.get("resume_video"), bool):
                 self.data["resume_video"] = bool(self.data.get("resume_video"))
+            self.data["update_mirror"] = str(self.data.get("update_mirror") or "").strip()
         except Exception:
             pass
         tmp = self.path + ".tmp"

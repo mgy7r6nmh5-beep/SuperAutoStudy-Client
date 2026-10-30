@@ -36,7 +36,7 @@ import zipfile
 
 # 当前客户端版本。每次发布时手动提升，需与 installer/setup.iss 的 MyAppVersion、
 # GitHub Release 的 tag 保持一致（发布流程见 README「发版」一节）。
-CURRENT_VERSION = "1.0.13"
+CURRENT_VERSION = "1.0.14"
 
 DEFAULT_REPO = "mgy7r6nmh5-beep/SuperAutoStudy-Client"
 API_BASE = "https://api.github.com"
@@ -48,6 +48,22 @@ SETUP_ASSET_RE = re.compile(r"SuperAutoStudy-Setup-.*\.exe$", re.I)
 CHECK_CACHE_SECONDS = 3600        # 检查结果缓存：启动时查一次，之后最多每小时一次
 AUTO_CHECK_DELAY = 20             # 启动后多久做第一次自动检查（秒）
 AUTO_CHECK_INTERVAL = 6 * 3600    # 自动检查间隔
+
+# 官方 GitHub 在国内经常只有几 KB/s（实测 110MB 的包下 5KB/s，要跑六小时）。
+# 所以官方地址始终排在最前面，下不动或者太慢才轮到这些镜像。
+# 都是前缀式代理：直接把 github 下载地址拼在后面即可。
+# 第三方服务不可控，但每个文件都强制 sha256 校验，被篡改/掉包会直接拒绝，
+# 不会装上一个动过手脚的包。
+DEFAULT_MIRRORS = (
+    "https://ghfast.top/",        # 实测 700+ KB/s
+    "https://gh-proxy.com/",      # 实测 130+ KB/s
+)
+
+# 下不动判定：socket 单次读超时。256KB 一块，低于约 13KB/s 就会撞上。
+STALL_TIMEOUT = 20
+# 起步太慢判定：这么多秒内还没下到这么多字节，就别耗了，换下一个源。
+PROBE_SECONDS = 25
+PROBE_MIN_BYTES = 256 * 1024
 
 
 # ------------------------------------------------------------------ 版本号
@@ -93,11 +109,14 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
-def _download(url, dest, expect_sha256=None, progress=None, timeout=120):
+def _download(url, dest, expect_sha256=None, progress=None, timeout=STALL_TIMEOUT):
     """下载到 dest（先写 .part 再原子改名）。给了期望哈希就硬校验，不符即删。
 
     Accept 头不能省：GitHub 的 API 资产地址不带 `Accept: application/octet-stream`
     时返回的是 **JSON 元数据**而不是文件本体（哈希对不上，实测踩过）。
+
+    速度保护：socket 超时按「单次读一块」算，起步阶段还会查一次进度。
+    官方源慢到几 KB/s 时不会傻等，直接抛错让上层换镜像。
     """
     if not url:
         raise RuntimeError("没有下载地址")
@@ -108,6 +127,7 @@ def _download(url, dest, expect_sha256=None, progress=None, timeout=120):
     })
     h = hashlib.sha256()
     done = 0
+    t0 = time.time()
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(tmp, "wb") as f:
         total = int(resp.headers.get("Content-Length") or 0)
         while True:
@@ -119,6 +139,10 @@ def _download(url, dest, expect_sha256=None, progress=None, timeout=120):
             done += len(chunk)
             if progress:
                 progress(done, total)
+            elapsed = time.time() - t0
+            if elapsed >= PROBE_SECONDS and done < PROBE_MIN_BYTES:
+                raise RuntimeError("起步太慢：%.0f 秒只下了 %d KB，换下一个源"
+                                   % (elapsed, done // 1024))
     digest = h.hexdigest()
     if expect_sha256 and digest.lower() != expect_sha256.lower():
         try:
@@ -171,6 +195,24 @@ class Updater:
             r = ""
         return r or DEFAULT_REPO
 
+    def mirrors(self):
+        """返回镜像前缀/模板列表。设置里留空用内置列表，填 '-' 就只用官方。"""
+        try:
+            raw = str(self._settings().data.get("update_mirror") or "").strip()
+        except Exception:
+            raw = ""
+        if raw in ("-", "off", "none", "no", "0"):
+            return []
+        if raw:
+            return [x for x in re.split(r"[\s,;]+", raw) if x]
+        return list(DEFAULT_MIRRORS)
+
+    def _mirror_url(self, mirror, browser_url):
+        """前缀式（直接拼）和模板式（含 {url}）都支持。"""
+        if "{url}" in mirror:
+            return mirror.replace("{url}", browser_url)
+        return mirror.rstrip("/") + "/" + browser_url
+
     # ---------------- 检查 ----------------
 
     def check(self, force=False):
@@ -210,6 +252,7 @@ class Updater:
                 "same_version": parse_version(latest) == parse_version(CURRENT_VERSION),
                 "client_asset": client_asset,
                 "setup_asset": setup_asset,
+                "mirrors": self.mirrors(),
                 "checked_at": now,
             }
             with self._lock:
@@ -260,8 +303,9 @@ class Updater:
     def _asset_source(self, asset, asset_url, asset_sha256):
         """确定 (urls, sha256, name)。显式传参优先，否则用 release 里的资产。
 
-        urls 是候选列表：API 资产地址（需 octet-stream，见 _download）+
-        browser_download_url 兜底 —— 两个 host 不同，防单点抽风。
+        urls 是候选列表，按顺序试：先官方两个地址（API 资产地址需 octet-stream，
+        见 _download；再加 browser_download_url 兜底 —— 两个 host 不同，防单点抽风），
+        最后才是镜像。官方能下就永远走官方，镜像只是兜底。
         """
         if asset_url:
             return [asset_url], (asset_sha256 or None), \
@@ -271,21 +315,34 @@ class Updater:
         urls = [u for u in (asset.get("url"), asset.get("browser_download_url")) if u]
         if not urls:
             raise RuntimeError("资产没有下载地址")
+        browser = asset.get("browser_download_url")
+        if browser:
+            for m in self.mirrors():
+                try:
+                    urls.append(self._mirror_url(m, browser))
+                except Exception:
+                    continue
         return urls, (asset_sha256 or asset.get("digest")), asset.get("name")
 
     def _download_asset(self, urls, dest, want, what):
-        """按候选地址依次尝试下载；全部失败才抛错。"""
+        """按候选地址依次尝试下载；全部失败才抛错。
+
+        顺序是官方在前、镜像在后，所以正常情况下第一行就是官方源。
+        """
         last = None
-        for u in urls:
+        for i, u in enumerate(urls, 1):
+            host = u.split("//", 1)[-1].split("/", 1)[0]
+            self._log("下载源 %d/%d：%s" % (i, len(urls), host))
             try:
                 return _download(u, dest, want, self._progress_cb)
             except Exception as exc:
                 last = exc
+                self._log("  %s 不行：%s" % (host, exc))
                 try:
                     os.remove(dest + ".part")
                 except OSError:
                     pass
-        raise RuntimeError("下载 %s 失败：%s" % (what, last))
+        raise RuntimeError("下载 %s 失败（试了 %d 个源）：%s" % (what, len(urls), last))
 
     # ---------------- 模式一：客户端补丁 ----------------
 

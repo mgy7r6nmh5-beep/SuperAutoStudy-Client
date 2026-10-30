@@ -5,5 +5,6 @@
   "resume_video": false,
   "skip_job_types": [],
   "video_only_course_ids": [],
-  "keep_awake": true
+  "keep_awake": true,
+  "update_mirror": ""
 }

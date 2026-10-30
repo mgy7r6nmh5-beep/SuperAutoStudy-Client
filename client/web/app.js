@@ -447,6 +447,23 @@ function viewSettings(d) {
         </div>
       </div>
 
+      <div class="setting-row">
+        <div>
+          <div class="setting-name">更新下载镜像</div>
+          <div class="setting-desc">
+            官方 GitHub 优先，只有它下不动或者慢到离谱才换镜像（每个文件都做 SHA256 校验，
+            镜像被篡改会直接拒绝）。<br>
+            留空 = 用内置列表（ghfast.top、gh-proxy.com）；填 <span class="mono">-</span> = 只用官方；
+            也可以自己写前缀，多个用逗号隔开。
+          </div>
+        </div>
+        <div class="setting-input">
+          <input class="field mono" id="set-update-mirror" type="text"
+                 placeholder="留空=内置镜像，- = 只用官方"
+                 value="${esc(s.update_mirror || '')}">
+        </div>
+      </div>
+
       <div class="row" style="margin-top:var(--s4)">
         <button class="btn btn-primary" data-act="save-settings">保存设置</button>
         <button class="btn" data-act="restart-backend">保存并重启后端</button>
@@ -614,6 +631,14 @@ function renderUpdate(d) {
   } else if (info) {
     html += `<div class="update-msg">当前版本比发布页上的最新版（<span class="mono">v${
       esc(info.latest)}</span>）还新</div>`;
+  }
+
+  // ---- 下载源顺序（只在有更新时提，平时是噪音）----
+  if (info && info.has_update) {
+    const ms = (info.mirrors || []).map(m => String(m)
+      .replace(/^https?:\/\//, '').replace(/\{url\}$/, '').replace(/\/$/, ''));
+    html += `<div class="update-hint" style="margin-top:0">下载顺序：官方 GitHub${
+      ms.length ? ' → ' + esc(ms.join(' → ')) : '（未配置镜像，只用官方）'}</div>`;
   }
 
   // ---- 新版本说明 ----
@@ -871,6 +896,7 @@ function collectSettings() {
     skip_job_types: skip,
     video_only_course_ids: videoOnly.split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
     keep_awake: !!($('#set-keep-awake') || {}).checked,
+    update_mirror: (($('#set-update-mirror') || {}).value || '').trim(),
   };
 }
 
