@@ -587,6 +587,8 @@ function viewQuiz(d) {
 
   const items = st.items || [];
   if (!items.length) {
+    // 全部交完之后这里最容易踩坑：以前直接 return 一句「没有要处理的测验」，
+    // 下面的「最近提交 · 得分」就整个不渲染了 —— 恰恰是最想看分的时候没得看。
     return `<div class="view-inner"><div class="panel">
       <div class="panel-head">
         <span class="panel-title">待确认的章节测验</span>
@@ -596,7 +598,9 @@ function viewQuiz(d) {
         现在没有要处理的测验
         <span class="hint">刷课碰到章节测验会自动抓题、让 AI 先出一份答案，抓到的都会列在这里等你过一眼。</span>
       </div>
-    </div></div>`;
+    </div>
+    ${viewQuizRecent()}
+    </div>`;
   }
 
   const ai = st.ai || {};
@@ -1496,7 +1500,7 @@ document.addEventListener('click', async (e) => {
     paintQuizOpts(pid, qid);
     return;
   }
-  if (act === 'quiz-reload') { S.quiz.items = null; return loadQuiz(); }
+  if (act === 'quiz-reload') { S.quiz.items = null; loadQuizRecent(true); return loadQuiz(); }
   if (act === 'quiz-submit') return doQuizSubmit(el.dataset.id);
   if (act === 'quiz-skip') return doQuizSkip(el.dataset.id);
   if (act === 'quiz-retry') return doQuizRetry(el.dataset.id);
