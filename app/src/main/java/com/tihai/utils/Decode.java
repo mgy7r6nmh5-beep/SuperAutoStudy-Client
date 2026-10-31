@@ -562,6 +562,18 @@ public class Decode {
             questions.add(q);
         }
         paper.setQuestions(questions);
+
+        // answerwqbid：所有题目 id 用逗号隔开、**末尾还多一个逗号**。
+        // 页面上这个 input 是空的，值由页面 JS 在点提交时拼出来；我们不走 JS，
+        // 只能自己拼。少了它（或者少了末尾那个逗号）服务端只回一句
+        // 「无效的参数：code-1！」，看响应完全看不出问题在哪。
+        // 拼法照抄 v1.0.8 之前那版能跑通的实现。
+        StringBuilder wqbid = new StringBuilder();
+        for (QuizQuestion q : questions) {
+            wqbid.append(q.getId()).append(',');
+        }
+        paper.getForm().put("answerwqbid", wqbid.toString());
+
         return paper;
     }
 

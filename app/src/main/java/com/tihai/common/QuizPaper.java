@@ -38,8 +38,20 @@ public class QuizPaper {
      * <p>别硬编码成 {@code /mooc-ans/work/addStudentWorkNewWeb}：action 里带着
      * {@code token}、{@code enc_work}、{@code workAnswerId}、{@code totalQuestionNum}
      * 这些每次会话都变的参数，少了必然被服务端拒。
+     *
+     * <p>而且这个值通常是**裸相对路径**（{@code addStudentWorkNewWeb?...}），
+     * 页面里也没有 {@code <base>}，得靠 {@link #pageUrl} 才能解析成绝对地址。
      */
     private String submitAction;
+
+    /**
+     * 抓题时那次请求的**最终**页面地址（跟完 302 之后的）。
+     *
+     * <p>{@code api/work?needRedirect=true} 会跳到 {@code /mooc-ans/work/doHomeWorkNew}，
+     * 相对的表单 action 就落在 {@code /mooc-ans/work/} 下。少了这个值，
+     * 无论拼 {@code /mooc-ans/} 还是 {@code /mooc-ans/api/} 都是 404。
+     */
+    private String pageUrl;
 
     /** 页面 form 里的隐藏字段（不含 answer*）。提交时原样带上。 */
     private Map<String, String> form = new LinkedHashMap<>();

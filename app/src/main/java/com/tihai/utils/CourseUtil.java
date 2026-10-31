@@ -1423,6 +1423,7 @@ public class CourseUtil {
                 course.getCourseId());
 
         String html = null;
+        String finalUrl = null;
         for (int attempt = 1; attempt <= 3; attempt++) {
             if (attempt >= 2) {
                 // 占位页是按副本随机出现的，重试必须换连接
@@ -1435,6 +1436,8 @@ public class CourseUtil {
                 String body = resp.body() == null ? "" : resp.body().string();
                 if (resp.isSuccessful() && body.contains("singleQuesId")) {
                     html = body;
+                    // 记下跟完 302 之后的地址，提交时用它解析表单的相对 action
+                    finalUrl = resp.request().url().toString();
                     break;
                 }
                 // 最后一次都没拿到就把最后那份存下来，便于排查
@@ -1457,6 +1460,7 @@ public class CourseUtil {
         paper.setJobId(job.getJobId());
         paper.setWorkId(workId);
         paper.setTitle(job.getTitle());
+        paper.setPageUrl(finalUrl);
 
         if (paper.size() == 0) {
             dumpQuizHtml(workId, html);
@@ -1508,9 +1512,19 @@ public class CourseUtil {
                     + "[quiz] 没有 submitAction，拒绝提交");
             return false;
         }
-        String url = action.startsWith("http")
-                ? action
-                : "https://mooc1.chaoxing.com/mooc-ans/" + action;
+        String url;
+        if (action.startsWith("http")) {
+            url = action;
+        } else if (paper.getPageUrl() != null && !paper.getPageUrl().isEmpty()) {
+            // 表单 action 是裸相对路径，必须按抓题时的**最终**页面地址解析。
+            // 浏览器就是这么做的：api/work?needRedirect=true 会 302 到
+            // /mooc-ans/work/doHomeWorkNew，相对路径自然落在 /mooc-ans/work/ 下。
+            // 硬编码 /mooc-ans/ 或 /mooc-ans/api/ 前缀都只会拿到 404。
+            url = java.net.URI.create(paper.getPageUrl()).resolve(action).toString();
+        } else {
+            url = "https://mooc1.chaoxing.com/mooc-ans/work/" + action;
+        }
+        System.out.println(Thread.currentThread().getName() + "[quiz] 提交地址 " + url);
 
         FormBody.Builder form = new FormBody.Builder(StandardCharsets.UTF_8);
         for (Map.Entry<String, String> e : paper.getForm().entrySet()) {
