@@ -42,6 +42,10 @@ DB_USER = "root"
 DB_PASS = "SuperAuto2026"
 DB_NAME = "tihai"
 
+# 启动判定：进程存活但 30 秒未就绪即超时；轮询间隔 0.5 秒
+READY_TIMEOUT = 30
+POLL_INTERVAL = 0.5
+
 DEFAULT_ROOT = ""  # 留空：部署根目录交给 find_root() 自动探测；打包分发时绝不能写死个人路径
 
 CREATE_NO_WINDOW = 0x08000000
@@ -422,6 +426,73 @@ def http_json(url, payload=None, method=None, timeout=30):
 ROOT = find_root()
 
 
+# ------------------------------------------------------------------ 启动探测
+
+def probe_backend(timeout=2.0):
+    """ready: 本部署的后端；busy: 3030 被别的程序占用；absent: 端口没开。"""
+    if not port_open(HTTP_PORT):
+        return "absent", None
+    try:
+        data = http_json("http://127.0.0.1:{}/api/where".format(HTTP_PORT), timeout=timeout)
+    except Exception:
+        return "busy", None
+    payload = (data or {}).get("data") or {}
+    root = payload.get("root")
+    if not root:
+        return "busy", data
+    try:
+        same = os.path.normcase(os.path.abspath(root)) == \
+            os.path.normcase(os.path.abspath(ROOT))
+    except Exception:
+        same = False
+    return ("ready" if same else "busy"), data
+
+
+def environment_self_check():
+    """JDK / jar 缺失自检；端口归属由 probe_backend 判定。"""
+    if not os.path.exists(SVC.java):
+        return {"ok": False, "errorCode": "STARTUP-JDK-001",
+                "reason": "随包 JDK 缺失", "nextStep": "重新安装客户端或恢复 jdk8 目录"}
+    if not SVC.jar():
+        return {"ok": False, "errorCode": "STARTUP-JAR-001",
+                "reason": "后端 jar 缺失", "nextStep": "重新安装或修复 app/target 下的 jar"}
+    state, _ = probe_backend()
+    if state == "busy":
+        return {"ok": False, "errorCode": "STARTUP-PORT-001",
+                "reason": "3030 已被其他程序占用", "nextStep": "关闭占用 3030 的程序后重试"}
+    return {"ok": True}
+
+
+def parse_startup_failure(path):
+    """从日志尾部解析 ==== STARTUP FAILED ==== 块；找不到返回 None。"""
+    try:
+        with io.open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    start = None
+    for i in range(len(lines) - 1, -1, -1):
+        if "==== STARTUP FAILED ====" in ANSI_RE.sub("", lines[i]):
+            start = i
+            break
+    if start is None:
+        return None
+    fields = {}
+    for line in lines[start:]:
+        clean = ANSI_RE.sub("", line).strip()
+        if clean.startswith("===="):
+            if "END STARTUP FAILED" in clean:
+                break
+            continue
+        if "=" not in clean:
+            continue
+        key, value = clean.split("=", 1)
+        fields[key.strip()] = value.strip()
+    if not fields.get("code"):
+        return None
+    return fields
+
+
 # ------------------------------------------------------------------ 设置
 
 
@@ -497,17 +568,16 @@ class Services:
     def livelog(self):
         return os.path.join(self.appdir, "live.log")
 
+    @property
+    def bootlog(self):
+        """仅承接日志系统初始化前的极早期崩溃输出。"""
+        return os.path.join(self.appdir, "boot.log")
+
     def log_path(self):
-        """后端日志：取 app.log / live.log 里更新的那个。"""
-        cands = []
-        for p in (self.livelog, self.applog):
-            try:
-                cands.append((os.path.getmtime(p), p))
-            except OSError:
-                pass
-        if not cands:
+        """后端日志统一到 live.log；不存在时退回 boot.log。"""
+        if os.path.exists(self.livelog):
             return self.livelog
-        return max(cands)[1]
+        return self.bootlog
 
     def jar(self):
         d = os.path.join(self.appdir, "target")
@@ -564,25 +634,28 @@ class Services:
         return "ok", "MySQL 启动中"
 
     def start_app(self):
-        if port_open(HTTP_PORT):
+        state, _ = probe_backend()
+        if state == "ready":
             return "already", "后端已在运行"
+        if state == "busy":
+            return "port-busy", "3030 已被其他程序占用"
         jar = self.jar()
         if not jar:
-            return "err", "jar 还没编译"
+            return "err", "后端 jar 缺失（app/target）"
         if not os.path.exists(self.java):
-            return "err", "找不到 {}".format(self.java)
+            return "err", "找不到随包 JDK：{}".format(self.java)
         args = [self.java, "-Dfile.encoding=UTF-8", "-jar", jar,
                 "--server.port={}".format(HTTP_PORT)]
 
         try:
-            self._app_fh = open(self.livelog, "ab", buffering=0)
+            self._app_fh = open(self.bootlog, "ab", buffering=0)
             self.app_proc = subprocess.Popen(
                 args, cwd=self.appdir, stdin=subprocess.DEVNULL,
                 stdout=self._app_fh, stderr=self._app_fh,
                 creationflags=FLAGS_HIDDEN)
         except Exception as exc:
             return "err", "启动后端失败: {}".format(exc)
-        return "ok", "后端启动中（约 7 秒）"
+        return "ok", "后端启动中"
 
     # ---- 停止
     def stop_app(self):
@@ -1248,8 +1321,39 @@ class Handler(BaseHTTPRequestHandler):
     # ---- POST
     def _api_post(self, p, body):
         if p == "/api/service/start":
+            started_at = time.time()
             msgs = []
-            backend_was_running = port_open(HTTP_PORT)
+
+            def elapsed_ms():
+                return int((time.time() - started_at) * 1000)
+
+            def failed(result, code, reason, next_step, phase="startup"):
+                return self._json({
+                    "ok": False,
+                    "messages": msgs + [reason],
+                    "result": result,
+                    "errorCode": code,
+                    "phase": phase,
+                    "reason": reason,
+                    "nextStep": next_step,
+                    "logPath": SVC.log_path(),
+                    "elapsedMs": elapsed_ms(),
+                })
+
+            chk = environment_self_check()
+            if not chk.get("ok"):
+                return failed("failed", chk["errorCode"], chk["reason"],
+                              chk.get("nextStep", ""), "env")
+
+            state, _ = probe_backend()
+            if state == "ready":
+                return self._json({"ok": True, "messages": ["后端已在运行"],
+                                   "result": "already", "elapsedMs": elapsed_ms(),
+                                   "logPath": SVC.log_path()})
+            if state == "busy":
+                return failed("port-busy", "STARTUP-PORT-001",
+                              "3030 已被其他程序占用", "关闭占用 3030 的程序后重试", "web")
+
             code, msg = SVC.start_mysql()
             msgs.append(msg)
             if code == "ok":
@@ -1257,39 +1361,83 @@ class Handler(BaseHTTPRequestHandler):
                     if port_open(DB_PORT):
                         break
                     time.sleep(0.5)
-            if not backend_was_running and port_open(DB_PORT):
-                try:
-                    added = SVC.ensure_schema()
-                    if added:
-                        msgs.append("升级数据表: {}".format("/".join(added)))
-                except Exception as exc:
-                    msgs.append("升级数据表失败: {}".format(exc))
-                try:
-                    n_reset, n_retry, n_done = SVC.reset_stuck_tasks(None)
-                    parts = []
-                    if n_reset:
-                        parts.append("重置 {} 个中断任务".format(n_reset))
-                    if n_retry:
-                        parts.append("重试 {} 个失败任务".format(n_retry))
-                    if n_done:
-                        parts.append("同步 {} 个已完成".format(n_done))
-                    if parts:
-                        msgs.append("，".join(parts))
-                except Exception as exc:
-                    msgs.append("续刷失败: {}".format(exc))
+            if not port_open(DB_PORT):
+                return failed("failed", "STARTUP-DB-001", "本地数据库未就绪",
+                              "先启动 MySQL（确认 127.0.0.1:3306 正在监听）", "datasource")
+
+            try:
+                added = SVC.ensure_schema()
+                if added:
+                    msgs.append("升级数据表: {}".format("/".join(added)))
+            except Exception as exc:
+                msgs.append("升级数据表失败: {}".format(exc))
+            try:
+                n_reset, n_retry, n_done = SVC.reset_stuck_tasks(None)
+                parts = []
+                if n_reset:
+                    parts.append("重置 {} 个中断任务".format(n_reset))
+                if n_retry:
+                    parts.append("重试 {} 个失败任务".format(n_retry))
+                if n_done:
+                    parts.append("同步 {} 个已完成".format(n_done))
+                if parts:
+                    msgs.append("，".join(parts))
+            except Exception as exc:
+                msgs.append("续刷失败: {}".format(exc))
+
             code, msg = SVC.start_app()
             msgs.append(msg)
-            if code in ("ok", "already"):
-                for _ in range(40):
-                    if port_open(HTTP_PORT):
-                        break
-                    time.sleep(0.5)
-            if port_open(HTTP_PORT):
+            if code == "port-busy":
+                return failed("port-busy", "STARTUP-PORT-001",
+                              "3030 已被其他程序占用", "关闭占用 3030 的程序后重试", "web")
+            if code not in ("ok", "already"):
+                low = msg.lower()
+                error_code = "STARTUP-JAR-001" if "jar" in low else (
+                    "STARTUP-JDK-001" if "jdk" in low else "STARTUP-INTERNAL-001")
+                return failed("failed", error_code, msg, "查看日志后重试", "env")
+
+            # 30 秒三段式判定：就绪 / 进程退出 / 超时
+            result = "timeout"
+            deadline = time.time() + READY_TIMEOUT
+            while time.time() < deadline:
+                st, _ = probe_backend(timeout=1.0)
+                if st == "ready":
+                    result = "ready"
+                    break
+                if st == "busy":
+                    result = "port-busy"
+                    break
+                proc = SVC.app_proc
+                if proc is not None and proc.poll() is not None:
+                    result = "failed"
+                    break
+                time.sleep(POLL_INTERVAL)
+
+            if result == "port-busy":
+                return failed("port-busy", "STARTUP-PORT-001",
+                              "3030 已被其他程序占用", "关闭占用 3030 的程序后重试", "web")
+            if result == "ready":
                 try:
                     SVC.rescan_queue()
                 except Exception as exc:
                     msgs.append("入队失败: {}".format(exc))
-            return self._json({"ok": True, "messages": msgs})
+                msgs.append("服务已就绪")
+                return self._json({"ok": True, "messages": msgs, "result": "ready",
+                                   "elapsedMs": elapsed_ms(), "logPath": SVC.log_path()})
+            if result == "failed":
+                fields = parse_startup_failure(SVC.livelog) or \
+                    parse_startup_failure(SVC.bootlog)
+                if fields:
+                    return failed("failed", fields.get("code", "STARTUP-INTERNAL-001"),
+                                  fields.get("reason", "后端启动失败"),
+                                  fields.get("next", "查看日志后重试"),
+                                  fields.get("phase", "fail"))
+                return failed("failed", "STARTUP-INTERNAL-001", "后端进程已退出",
+                              "查看日志末尾的异常后重试", "fail")
+
+            return failed("timeout", "STARTUP-TIMEOUT-001",
+                          "后端进程存活但 30 秒内未就绪",
+                          "查看日志确认是否卡在数据库或端口；进程与日志已保留", "ready")
 
         if p == "/api/service/stop":
             msgs = []

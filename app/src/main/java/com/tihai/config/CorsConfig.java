@@ -1,6 +1,8 @@
 package com.tihai.config;
 
 import com.tihai.properties.CorsProperties;
+import com.tihai.startup.CorsOriginResolver;
+import com.tihai.startup.CorsOriginSet;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.cors.CorsConfiguration;
@@ -24,10 +26,12 @@ public class CorsConfig {
      * @return CorsFilter
      */
     @Bean
-    public CorsFilter corsFilter(CorsProperties corsProperties) {
+    public CorsFilter corsFilter(CorsProperties corsProperties, CorsOriginResolver corsOriginResolver) {
         CorsConfiguration corsConfiguration = new CorsConfiguration();
         corsConfiguration.setAllowCredentials(true);
-        corsConfiguration.setAllowedOrigins(Arrays.asList(corsProperties.getOrigins()));
+        // 未配置 / 空 / 全空白时回退本机四个默认来源；显式配置完全替换默认值
+        CorsOriginSet originSet = corsOriginResolver.resolve(corsProperties.getOrigins());
+        corsConfiguration.setAllowedOrigins(originSet.getOrigins());
         corsConfiguration.setAllowedHeaders(Arrays.asList(
                 "Origin",
                 "Access-Control-Allow-Origin",

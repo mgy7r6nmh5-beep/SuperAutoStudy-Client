@@ -214,7 +214,7 @@ SuperAutoStudy/
 
 | 层 | 技术 |
 |---|---|
-| 后端 | Spring Boot 2.7 + Netty（`:3030`），Dubbo 2.7（`:20880`） |
+| 后端 | Spring Boot 2.7 + Netty（`:3030`）；单机模式不监听 Dubbo RPC 端口 |
 | 数据库 | MySQL 5.7（`:3306`，库 `tihai`） |
 | 客户端服务 | Python 3.13 标准库 + pymysql（`:3080`，静态托管 + 反向代理） |
 | 客户端界面 | 原生 HTML / CSS / JS 单页，无框架 |
@@ -250,6 +250,8 @@ mvn clean package -DskipTests
 ```bash
 java -jar app/target/SuperAuto-1.0-SNAPSHOT.jar --server.port=3030
 ```
+
+启动失败时控制台末尾会输出 `==== STARTUP FAILED ====` 块，包含 `code`（如 `STARTUP-DB-001`）、`reason`、`next` 与 `logPath`；完整日志固定写入 `<部署根>/app/live.log`。
 
 ### 客户端（Python）
 

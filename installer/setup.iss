@@ -14,7 +14,7 @@
 ; ============================================================
 
 #define MyAppName "SuperAutoStudy"
-#define MyAppVersion "1.0.15"
+#define MyAppVersion "1.0.16"
 #define MyAppPublisher "SuperAutoStudy"
 #define MyAppExeName "launch.cmd"
 
@@ -32,7 +32,7 @@ AllowNoIcons=yes
 ; Install per-user, no admin prompt needed.
 PrivilegesRequired=lowest
 OutputDir=.
-OutputBaseFilename=SuperAutoStudy-Setup-1.0.15
+OutputBaseFilename=SuperAutoStudy-Setup-1.0.16
 SetupIconFile=SuperAutoStudy\app.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -70,7 +70,7 @@ Source: "SuperAutoStudy\mysql57\data\*"; DestDir: "{app}\mysql57\data"; Flags: i
 ; packager's absolute basedir/datadir, and mysqld launched with it reads a
 ; datadir that only exists on the build machine. client/server.py rewrites
 ; my.ini from the real install root on every start (Services.ensure_my_ini).
-Source: "SuperAutoStudy\*"; Excludes: "mysql57\data\*,client\settings.json,my.ini,diag-report.txt,*__pycache__*,*.pyc,mysql57\console.log*,mysql57\mysql-error.log,app\live.log,app\app.log"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "SuperAutoStudy\*"; Excludes: "mysql57\data\*,client\settings.json,my.ini,diag-report.txt,*__pycache__*,*.pyc,mysql57\console.log*,mysql57\mysql-error.log,app\live.log,app\app.log,app\boot.log"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"
@@ -83,6 +83,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 Type: files; Name: "{app}\my.ini"
 Type: files; Name: "{app}\app\live.log"
 Type: files; Name: "{app}\app\app.log"
+Type: files; Name: "{app}\app\boot.log"
 Type: files; Name: "{app}\mysql57\mysql-error.log"
 
 [Code]

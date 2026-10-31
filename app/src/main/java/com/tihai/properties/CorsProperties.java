@@ -4,6 +4,9 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * @Copyright : DuanInnovator
  * @Description : 跨域允许地址配置
@@ -16,8 +19,9 @@ import org.springframework.context.annotation.Configuration;
 @Data
 public class CorsProperties {
     /**
-     * 允许跨域的域名
+     * 允许跨域的域名。
+     * 默认空集合：由 CorsOriginResolver 回退到本机四个默认来源，避免未配置时 NPE。
      */
-    private String[] origins;
+    private List<String> origins = new ArrayList<>();
 }
 

@@ -722,7 +722,17 @@ async function doStart() {
   S.busy = true;
   toast('正在启动 MySQL 与后端…');
   const r = await api('/api/service/start', { method: 'POST' });
-  toast((r.messages || []).join(' ｜ ') || '已启动', 'ok');
+  if (r.ok && (!r.result || r.result === 'ready' || r.result === 'already')) {
+    toast((r.messages || []).join(' ｜ ') || '已启动', 'ok');
+  } else {
+    const parts = [
+      r.errorCode || '',
+      r.reason || (r.messages || []).join(' ｜ ') || '启动失败',
+      r.nextStep ? ('下一步：' + r.nextStep) : '',
+      r.logPath ? ('日志：' + r.logPath) : '',
+    ].filter(Boolean);
+    toast(parts.join(' ｜ '), 'err');
+  }
   S.busy = false;
   poll();
 }

@@ -13,6 +13,8 @@ spring:
         enabled: false
       config:
         enabled: false
+    discovery:
+      enabled: false
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/tihai?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
@@ -47,5 +49,21 @@ super-star:
 dubbo:
   registry:
     address: N/A
+  protocol:
+    # 单机部署不监听 RPC 端口（N/A 只停注册，不阻止协议导出）
+    name: injvm
+    port: -1
   application:
     qos-enable: false
+
+superauto:
+  # 仅供自描述与可读性；真正生效的是启动前写入的系统属性
+  standalone:
+    enabled: true
+  middleware:
+    nacos-config-enabled: false
+    nacos-discovery-enabled: false
+    dubbo-export-enabled: false
+  startup:
+    db-check-timeout-seconds: 5
+    ready-timeout-seconds: 30
