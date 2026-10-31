@@ -53,6 +53,21 @@ public class QuizPaper {
      */
     private String pageUrl;
 
+    /**
+     * 这一份是不是**已经交过、现在拿到的只是批阅页**。
+     *
+     * <p>交过之后同一个 workId 再请求，超星不再给做题页，直接跳到
+     * {@code selectWorkQuestionYiPiYue}（「我的答案 / 正确答案」那页）。
+     * 那页里也有 {@code div.singleQuesId}，能解析出题目，但：
+     * <ul>
+     *   <li>题型全是 unknown（批阅页没有 {@code TiMu[data]} 那个题型码）</li>
+     *   <li>页面上第一个 {@code <form>} 是「题目纠错」的，
+     *       action 指向 {@code fanyapbl.fy.chaoxing.com/questionError/addQuestion}</li>
+     * </ul>
+     * 不认出来就会把一份已完成的卷子重新挂到「待确认」，点提交还会往纠错接口发。
+     */
+    private boolean alreadySubmitted;
+
     /** 页面 form 里的隐藏字段（不含 answer*）。提交时原样带上。 */
     private Map<String, String> form = new LinkedHashMap<>();
 

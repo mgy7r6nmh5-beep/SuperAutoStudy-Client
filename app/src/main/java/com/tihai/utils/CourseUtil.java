@@ -1451,6 +1451,28 @@ public class CourseUtil {
             }
         }
 
+        // 交过的章节：超星不再给做题页，直接跳到 selectWorkQuestionYiPiYue 批阅页。
+        // 这页里也有 div.singleQuesId，硬解也能解出题目，但题型全是 unknown，
+        // 而且页面上第一个 <form> 是「题目纠错」的，action 指向
+        // fanyapbl.fy.chaoxing.com/questionError/addQuestion —— 拿它提交等于给
+        // 每道题报一次错。所以必须在解析之前就认出来，直接告诉调用方「这章交过了」。
+        if (finalUrl != null && finalUrl.contains("selectWorkQuestionYiPiYue")) {
+            QuizPaper done = new QuizPaper();
+            done.setCourseId(course.getCourseId());
+            done.setCourseName(course.getTitle());
+            done.setClazzId(course.getClazzId());
+            done.setCpi(cpi);
+            done.setKnowledgeId(knowledgeId);
+            done.setJobId(job.getJobId());
+            done.setWorkId(workId);
+            done.setTitle(job.getTitle());
+            done.setPageUrl(finalUrl);
+            done.setAlreadySubmitted(true);
+            System.out.println(Thread.currentThread().getName()
+                    + "[quiz] 这一章已经交过（批阅页），跳过: " + job.getTitle());
+            return done;
+        }
+
         QuizPaper paper = Decode.decodeQuizPaper(html == null ? "" : html);
         paper.setCourseId(course.getCourseId());
         paper.setCourseName(course.getTitle());
@@ -1506,6 +1528,12 @@ public class CourseUtil {
         if (paper == null || paper.size() == 0) {
             return false;
         }
+        if (paper.isAlreadySubmitted()) {
+            // 抓到的是批阅页，交不了。走到这里说明调用方没看 alreadySubmitted。
+            System.out.println(Thread.currentThread().getName()
+                    + "[quiz] 这份是已提交后的批阅页，拒绝再次提交");
+            return false;
+        }
         String action = paper.getSubmitAction();
         if (action == null || action.isEmpty()) {
             System.out.println(Thread.currentThread().getName()
@@ -1523,6 +1551,15 @@ public class CourseUtil {
             url = java.net.URI.create(paper.getPageUrl()).resolve(action).toString();
         } else {
             url = "https://mooc1.chaoxing.com/mooc-ans/work/" + action;
+        }
+        // 兜底：真正的提交地址一定在 chaoxing.com 上。批阅页那个「题目纠错」表单
+        // 指向 fanyapbl.fy.chaoxing.com/questionError/addQuestion，照着提交等于
+        // 给每道题报一次错，而且响应还是 200，看不出问题。
+        String host = java.net.URI.create(url).getHost();
+        if (host == null || !host.endsWith("chaoxing.com") || url.contains("questionError")) {
+            System.out.println(Thread.currentThread().getName()
+                    + "[quiz] 提交地址不像做题页（" + url + "），拒绝提交");
+            return false;
         }
         System.out.println(Thread.currentThread().getName() + "[quiz] 提交地址 " + url);
 

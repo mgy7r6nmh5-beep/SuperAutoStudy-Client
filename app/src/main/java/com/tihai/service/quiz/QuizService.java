@@ -95,7 +95,15 @@ public class QuizService {
      */
     public long prepare(Course course, Job job, JobInfo jobInfo, String account) {
         try {
+            if (!claim(account, job.getJobId())) {
+                return -1;
+            }
             QuizPaper paper = courseUtil.fetchQuizPaper(course, job, jobInfo);
+            if (paper.isAlreadySubmitted()) {
+                // 这一章早就交过了，超星给的是批阅页。不挂到「待确认」，
+                // 不然每次重跑课程都会把已完成的小测再列一遍。
+                return -1;
+            }
             if (paper.size() == 0) {
                 return saveRaw(account, course, job, paper, STATUS_BROKEN,
                         "没解析出题目（可能不是题目页，见 app/quiz-dump/）");
@@ -118,6 +126,34 @@ public class QuizService {
                 return -1;
             }
         }
+    }
+
+    /**
+     * 同一个任务点只留一条记录，返回 true 表示「可以开始抓题」。
+     *
+     * <p>刷课重启太常见了，不去重的话「待确认」里会堆出一串一模一样的卷子。
+     * 待确认 / 已提交 / 用户跳过的直接跳过；上次抓题失败的删掉重来 ——
+     * 不然超星改了页面之后这一章就永远恢复不了了。
+     */
+    private boolean claim(String account, String jobId) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT id, status FROM th_wk_quiz WHERE account = ? AND job_id = ? ORDER BY id DESC",
+                account, jobId);
+        for (Map<String, Object> row : rows) {
+            int st = ((Number) row.get("status")).intValue();
+            long id = ((Number) row.get("id")).longValue();
+            if (st == STATUS_FAILED) {
+                // 提交失败那条留着给用户看，但允许重新抓一份
+                continue;
+            }
+            if (st == STATUS_BROKEN) {
+                jdbc.update("DELETE FROM th_wk_quiz WHERE id = ?", id);
+                continue;
+            }
+            log.info("测验 {} 已有记录 #{}（status={}），不再重复抓题", jobId, id, st);
+            return false;
+        }
+        return true;
     }
 
     private long saveRaw(String account, Course course, Job job, QuizPaper paper,
@@ -229,6 +265,13 @@ public class QuizService {
         } catch (Exception e) {
             result.put("ok", false);
             result.put("message", "记录内容损坏: " + e.getMessage());
+            return result;
+        }
+
+        if (paper.isAlreadySubmitted()) {
+            updateStatus(id, STATUS_SUBMITTED, "抓到的已经是批阅页，说明早就交过了");
+            result.put("ok", false);
+            result.put("message", "这份之前就交过了（抓到的是批阅页）");
             return result;
         }
 
