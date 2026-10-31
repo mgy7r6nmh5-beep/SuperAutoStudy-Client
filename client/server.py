@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -619,6 +620,12 @@ def save_ai_config(patch):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+    # 覆盖之前把上一份留成 ai-config.json.bak：地址/模型填错了还能照着捞回来
+    try:
+        if os.path.exists(path):
+            shutil.copy2(path, path + ".bak")
+    except OSError:
+        pass
     os.replace(tmp, path)
     return cfg
 

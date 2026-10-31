@@ -84,12 +84,14 @@
             <artifactId>jackson-databind</artifactId>
             <version>2.13.4</version>
         </dependency>
-        <!-- https://mvnrepository.com/artifact/org.apache.pdfbox/pdfbox -->
+        <!-- 章节测验的字体反爬要解 TTF 字形轮廓（FontDecoder / TTFFileParser 都用
+             org.apache.fontbox.ttf.TTFParser），这是**运行期**依赖，必须进 fat jar。
+             曾经图省事标成 provided 又从 repackage 里排除，结果一遇到加密字体的章节就
+             NoClassDefFoundError，整章测验直接跳过。 -->
         <dependency>
             <groupId>org.apache.pdfbox</groupId>
             <artifactId>fontbox</artifactId>
             <version>2.0.24</version>
-            <scope>provided</scope>
         </dependency>
 
         <dependency>
@@ -302,10 +304,6 @@
                         <exclude>
                             <groupId>org.apache.pdfbox</groupId>
                             <artifactId>pdfbox</artifactId>
-                        </exclude>
-                        <exclude>
-                            <groupId>org.apache.pdfbox</groupId>
-                            <artifactId>fontbox</artifactId>
                         </exclude>
                         <exclude>
                             <groupId>com.alibaba</groupId>

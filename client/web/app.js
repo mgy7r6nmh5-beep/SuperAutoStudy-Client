@@ -792,6 +792,60 @@ function renderQuizModeDesc() {
   box.textContent = QUIZ_MODE_DESC[sel.value] || '';
 }
 
+// 草稿。设置页一重绘（切标签、页面重载、客户端重启后窗口重开）表单就会被
+// 服务端值填回去，用户刚敲进去的地址和模型名当场蒸发，再点保存存回去的还是旧值。
+// 所以每敲一下就往 localStorage 存一份，重绘时发现草稿和磁盘不一致就把草稿填回去。
+const AI_DRAFT_KEY = 'sas-ai-draft';
+const AI_FIELDS = ['ai-base-url', 'ai-model', 'ai-key', 'ai-timeout', 'ai-answer-mode'];
+
+function readAiDraft() {
+  try { return JSON.parse(localStorage.getItem(AI_DRAFT_KEY) || 'null'); } catch (e) { return null; }
+}
+function writeAiDraft() {
+  const el = $('#ai-base-url');
+  if (!el) return;
+  try { localStorage.setItem(AI_DRAFT_KEY, JSON.stringify(collectAiConfig())); } catch (e) { /* 隐私模式写不进去就算了 */ }
+}
+function clearAiDraft() {
+  try { localStorage.removeItem(AI_DRAFT_KEY); } catch (e) { /* 同上 */ }
+}
+function aiFormFocused() {
+  const a = document.activeElement;
+  return !!(a && a.id && AI_FIELDS.indexOf(a.id) >= 0);
+}
+
+// 草稿和磁盘上的值是否一致。地址末尾斜杠、超时数字类型这些不算差异。
+function sameAiConfig(d, c) {
+  const norm = s => String(s == null ? '' : s).trim().replace(/\/+$/, '');
+  if (norm(d.base_url) !== norm(c.base_url)) return false;
+  if (norm(d.model) !== norm(c.model)) return false;
+  if (String(d.answer_mode || 'confirm') !== String(c.answer_mode || 'confirm')) return false;
+  if (Number(d.timeout_sec || 90) !== Number(c.timeout_sec || 90)) return false;
+  const k = String(d.api_key || '');
+  if (k && k.indexOf('****') < 0 && k !== String(c.api_key || '')) return false;
+  return true;
+}
+
+function restoreAiDraft(c) {
+  const box = $('#ai-config-body');
+  if (!box) return;
+  const d = readAiDraft();
+  if (!d || sameAiConfig(d, c)) return;
+  const put = (id, v) => { const el = $('#' + id); if (el) el.value = v; };
+  put('ai-base-url', d.base_url || '');
+  put('ai-model', d.model || '');
+  put('ai-timeout', d.timeout_sec || 90);
+  put('ai-answer-mode', d.answer_mode || 'confirm');
+  // 掩码 key 不回填，回填了也存不进去（服务端认得出 **** 表示「不改」）
+  if (d.api_key && String(d.api_key).indexOf('****') < 0) put('ai-key', d.api_key);
+  renderQuizModeDesc();
+  if ($('#ai-draft-tip')) return;
+  box.insertAdjacentHTML('afterbegin',
+    `<div class="hint" id="ai-draft-tip" style="color:var(--warn);margin-bottom:var(--s2);line-height:1.7">
+       上次改的还没保存，已经帮你填回表单了（磁盘上仍是旧配置）。确认无误点「保存 AI 配置」才会写进去。
+     </div>`);
+}
+
 async function renderAiConfig() {
   const r = await api('/api/ai-config');
   const box = $('#ai-config-body');
@@ -803,6 +857,8 @@ async function renderAiConfig() {
   }
   const c = r.config || {};
   S.quiz.ai = c;
+  // 光标正在某个输入框里就别覆盖 —— 这时候填值等于把用户敲了一半的地址抹掉
+  if (aiFormFocused()) return;
   const put = (id, v) => { const el = $('#' + id); if (el) el.value = v; };
   put('ai-base-url', c.base_url || '');
   put('ai-model', c.model || '');
@@ -810,6 +866,7 @@ async function renderAiConfig() {
   put('ai-timeout', c.timeout_sec || 90);
   put('ai-answer-mode', c.answer_mode || 'confirm');
   renderQuizModeDesc();
+  restoreAiDraft(c);
   const st = $('#ai-status');
   if (st) {
     st.innerHTML = c.has_key
@@ -835,6 +892,9 @@ async function doSaveAiConfig() {
   const r = await api('/api/ai-config', { method: 'POST', body: collectAiConfig() });
   if (!r || !r.ok) { toast('保存失败：' + ((r && r.error) || '未知错误'), 'err'); return; }
   S.quiz.ai = r.config;
+  clearAiDraft();
+  const tip = $('#ai-draft-tip');
+  if (tip) tip.remove();
   toast(r.config.has_key ? 'AI 配置已保存，下份测验就会用它' : '已保存，但 api_key 还是空的', r.config.has_key ? 'ok' : 'err');
   renderAiConfig();
 }
@@ -1352,7 +1412,7 @@ document.addEventListener('change', (e) => {
   }
   if (el.id === 'log-only-err') { S.logOnlyErr = el.checked; renderLogs(S.data, false); }
   if (el.id === 'log-auto') { S.logAutoScroll = el.checked; }
-  if (el.id === 'ai-answer-mode') { renderQuizModeDesc(); }
+  if (el.id === 'ai-answer-mode') { renderQuizModeDesc(); writeAiDraft(); }
 });
 
 document.addEventListener('input', (e) => {
@@ -1361,6 +1421,8 @@ document.addEventListener('input', (e) => {
     renderLogs(S.data, false);
     return;
   }
+  // AI 配置：边敲边存草稿，页面被重绘/重开也不丢
+  if (e.target.id && AI_FIELDS.indexOf(e.target.id) >= 0) { writeAiDraft(); return; }
   // 填空/简答：只记进 state，不重绘 —— 一重绘输入框就失焦，没法连续打字
   const el = e.target;
   if (el.dataset && el.dataset.act === 'qz-fill') {
