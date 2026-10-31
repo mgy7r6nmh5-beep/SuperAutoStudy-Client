@@ -370,7 +370,12 @@ def tail_lines(path, n=LOG_TAIL_LINES, max_bytes=LOG_TAIL_BYTES):
 #
 # 改成按字节偏移增量读：每行只会被处理一次，与内容是否重复无关。
 _LOG_READ_LOCK = threading.Lock()
-_LOG_OFFSET = {"pos": 0}
+_LOG_OFFSET = {"pos": 0, "path": None}
+
+# 首读只回放日志尾部这么多字节。用 LOG_TAIL_BYTES（200KB）的话会把上一个进程
+# 遗留的「开始学习视频」一起喂进 LiveTracker，那些线程早已不存在，卡片却按
+# 「刚看到」算时间，于是总览上多出一张跑不完的幽灵卡（实测 elapsed=2581s）。
+FIRST_READ_BYTES = 16384
 
 
 def read_log_incremental(path):
@@ -380,11 +385,16 @@ def read_log_incremental(path):
             size = os.path.getsize(path)
         except OSError:
             return []
+        if _LOG_OFFSET.get("path") != path:    # 换文件了（boot.log ↔ live.log）：偏移重来
+            _LOG_OFFSET["path"] = path
+            _LOG_OFFSET["pos"] = 0
         start = _LOG_OFFSET["pos"]
+        mid_start = False
         if size < start:                       # 日志被截断/轮转：从头读
             start = 0
-        elif start == 0 and size > LOG_TAIL_BYTES:
-            start = size - LOG_TAIL_BYTES      # 首读只取尾部，避免全量重放
+        elif start == 0 and size > FIRST_READ_BYTES:
+            start = size - FIRST_READ_BYTES    # 首读只取尾部，避免全量重放
+            mid_start = True
         if size <= start:
             return []
         try:
@@ -393,6 +403,14 @@ def read_log_incremental(path):
                 data = f.read()
         except OSError:
             return []
+        # 只有「从文件中间切进去」那一次才可能撞上半行；正常增量读取是从行首开始的，
+        # 这时候再丢第一行会把刚写进来的进度日志整条吃掉（之前就踩了这个）。
+        if mid_start and not data.startswith(b"\n"):
+            cut = data.find(b"\n")
+            if cut < 0:
+                return []
+            start += cut + 1
+            data = data[cut + 1:]
         end = start + len(data)
         if data and not data.endswith(b"\n"):
             cut = data.rfind(b"\n")            # 末行可能只写了一半，退回完整行
@@ -574,10 +592,21 @@ class Services:
         return os.path.join(self.appdir, "boot.log")
 
     def log_path(self):
-        """后端日志统一到 live.log；不存在时退回 boot.log。"""
-        if os.path.exists(self.livelog):
-            return self.livelog
-        return self.bootlog
+        """界面日志和「正在刷的视频」都要盯 boot.log。
+
+        v1.0.16 起 start_app() 把 java 的 stdout/stderr 重定向到 boot.log
+        （早期崩溃也能留证据），logback 的 CONSOLE appender 也跟着进了 boot.log，
+        所以 boot.log 才是「当前进程的完整输出」——刷课进度那些 System.out
+        （续刷课程 / 开始学习视频 / 播放位置）全在里面。
+
+        live.log 是 logback 的 FILE appender，只收日志事件、没有 System.out，
+        而且进程重启后不再续写。原来这里优先返回 live.log，结果界面日志视图和
+        LiveTracker 都盯着一个不再更新的文件 —— 总览「正在刷的视频」「最近完成的视频」
+        永远是空的，日志页也停在旧进程的内容上。
+        """
+        if os.path.exists(self.bootlog):
+            return self.bootlog
+        return self.livelog
 
     def jar(self):
         d = os.path.join(self.appdir, "target")
