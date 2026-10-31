@@ -546,6 +546,144 @@ class Settings:
 SETTINGS = Settings(SETTINGS_PATH)
 
 
+# ------------------------------------------------------------------ AI 配置
+# 章节测验靠大模型作答，配置放哪很讲究：后端（java）的工作目录是 <root>/app，
+# AiAnswerService 读的是**相对路径** ai-config.json，所以文件必须落在 app/ 下。
+# 塞进 client/settings.json 是没用的 —— 两边读的根本不是一个文件。
+AI_BASE_URL = "https://api.deepseek.com"
+AI_MODEL = "deepseek-chat"
+AI_TIMEOUT_SEC = 60
+
+
+def ai_config_path():
+    return os.path.join(SVC.appdir, "ai-config.json")
+
+
+def load_ai_config():
+    """读 AI 配置；文件不存在时返回默认值（api_key 为空 = 未配置）。"""
+    cfg = {"base_url": AI_BASE_URL, "api_key": "", "model": AI_MODEL,
+           "timeout_sec": AI_TIMEOUT_SEC}
+    try:
+        with open(ai_config_path(), "r", encoding="utf-8") as f:
+            saved = json.load(f)
+    except Exception:
+        return cfg
+    if isinstance(saved, dict):
+        for k in ("base_url", "api_key", "model"):
+            v = saved.get(k)
+            if isinstance(v, str) and v.strip():
+                cfg[k] = v.strip()
+        try:
+            cfg["timeout_sec"] = int(saved.get("timeout_sec") or AI_TIMEOUT_SEC)
+        except (TypeError, ValueError):
+            pass
+    return cfg
+
+
+def save_ai_config(patch):
+    """写 AI 配置。
+
+    api_key 传空串或传掩码（sk-****abcd）一律理解为「不改」——界面回显的是掩码，
+    用户只改模型名时如果把掩码原样回传当真 key 存下去，key 就废了。
+    """
+    cfg = load_ai_config()
+    if isinstance(patch, dict):
+        for k in ("base_url", "model"):
+            v = patch.get(k)
+            if isinstance(v, str) and v.strip():
+                cfg[k] = v.strip()
+        key = patch.get("api_key")
+        if isinstance(key, str):
+            key = key.strip()
+            if key and "****" not in key:
+                cfg["api_key"] = key
+        try:
+            t = int(patch.get("timeout_sec") or cfg["timeout_sec"])
+            cfg["timeout_sec"] = max(10, min(300, t))
+        except (TypeError, ValueError):
+            pass
+    path = ai_config_path()
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return cfg
+
+
+def mask_key(key):
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "****"
+    return key[:3] + "****" + key[-4:]
+
+
+def ai_config_public(cfg):
+    return {
+        "base_url": cfg["base_url"],
+        "model": cfg["model"],
+        "timeout_sec": cfg["timeout_sec"],
+        "api_key": mask_key(cfg["api_key"]),
+        "has_key": bool(cfg["api_key"]),
+        "path": ai_config_path(),
+    }
+
+
+def ai_endpoint(cfg):
+    """拼 /chat/completions 地址。
+
+    必须和 Java 那边 Config.endpoint() 一字不差地同规则 —— 界面上的「测一下」
+    要测的就是后端真正会去请求的那个地址，不然测通了照样白搭。
+    """
+    base = (cfg.get("base_url") or "").strip().rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    if not base.endswith("/v1"):
+        base += "/v1"
+    return base + "/chat/completions"
+
+
+def test_ai_config(cfg):
+    """真发一个最小请求，确认 key / 地址 / 模型三者都对得上。
+
+    只能在客户端（python）这边发：各家大模型 API 基本都不给 CORS 头，
+    浏览器直连必定被拦，看起来像"key 无效"。
+    """
+    if not cfg.get("api_key"):
+        return {"ok": False, "error": "还没填 api_key"}
+    payload = {
+        "model": cfg["model"],
+        "messages": [{"role": "user", "content": "只回两个字：能用"}],
+        "max_tokens": 8,
+        "temperature": 0,
+        "stream": False,
+    }
+    req = urllib.request.Request(
+        ai_endpoint(cfg),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={"Authorization": "Bearer " + cfg["api_key"],
+                 "Content-Type": "application/json; charset=utf-8"})
+    started = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=min(60, cfg["timeout_sec"])) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        return {"ok": False, "error": "HTTP {} {}".format(exc.code, detail)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    ms = int((time.time() - started) * 1000)
+    try:
+        reply = json.loads(body)["choices"][0]["message"]["content"]
+    except Exception:
+        return {"ok": False, "error": "返回的不是 OpenAI 格式：" + body[:200]}
+    return {"ok": True, "reply": str(reply).strip()[:40], "ms": ms}
+
+
 # ------------------------------------------------------------------ 服务控制
 
 
@@ -776,6 +914,23 @@ SELECT account, CHAR_LENGTH(COALESCE(cookies, '')) AS cookie_len
                             "CHAR_LENGTH(COALESCE(cookies,'')) FROM th_wk_user "
                             "ORDER BY id DESC LIMIT 1")
                 return cur.fetchone()
+        finally:
+            conn.close()
+
+    def pending_quiz(self):
+        """待人工确认的测验条数（给标签页小红点用）。
+
+        th_wk_quiz 是后端启动时建的，后端从没跑过的库上表不存在，
+        这时返回 0 就行 —— 不能因为一个小红点把整个 /api/state 打挂。
+        """
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM th_wk_quiz WHERE status IN (1,5)")
+                row = cur.fetchone()
+                return int(row[0] or 0) if row else 0
+        except Exception:
+            return 0
         finally:
             conn.close()
 
@@ -1203,6 +1358,7 @@ def build_state():
         "live": [],
         "logs": [],
         "settings": SETTINGS.data,
+        "quizPending": 0,
         "keep_awake": {
             "enabled": bool(SETTINGS.data.get("keep_awake", True)),
             "active": bool(_KEEP_AWAKE["active"]),
@@ -1221,6 +1377,11 @@ def build_state():
             state["account"] = {"account": login[0], "logged_in": bool(login[1])}
         elif rows is not None:
             state["account"] = {"account": None, "logged_in": False}
+
+        try:
+            state["quizPending"] = SVC.pending_quiz()
+        except Exception:
+            state["quizPending"] = 0
 
         if rows:
             backend_started = None
@@ -1423,6 +1584,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(http_json(url, timeout=60))
             except Exception as exc:
                 return self._json({"ok": False, "error": str(exc)})
+
+        # 章节测验：待确认列表。后端整份返回（题目 + AI 建议），这里只做转发。
+        if p == "/api/quiz":
+            acc = SVC.fetch_account()
+            if not acc:
+                return self._json({"ok": False, "error": "本地没有账号"})
+            limit = (q.get("limit") or ["30"])[0]
+            url = "http://127.0.0.1:{}/api/quiz?account={}&limit={}".format(
+                HTTP_PORT, quote(acc[0]), quote(limit))
+            try:
+                return self._json(http_json(url, timeout=60))
+            except urllib.error.HTTPError as exc:
+                # 客户端先更新、jar 还是旧的（没有 QuizController）时会走到这里
+                return self._json({"ok": False,
+                                   "error": "后端不支持章节测验（HTTP {}）。"
+                                            "需要连后端一起更新到含做题功能的新版本。".format(exc.code)})
+            except Exception as exc:
+                return self._json({"ok": False, "error": "连不上后端：" + str(exc)})
+
+        if p == "/api/ai-config":
+            return self._json({"ok": True, "config": ai_config_public(load_ai_config())})
 
         if p == "/api/update/check":
             if UPDATER is None:
@@ -1631,6 +1813,36 @@ class Handler(BaseHTTPRequestHandler):
             saved = SETTINGS.save(body)
             print("[操作] 保存设置 -> {}".format(saved))
             return self._json({"ok": True, "settings": saved})
+
+        # 提交 / 跳过一份测验。一次提交就定分，所以这里不做任何自动重试。
+        m = re.match(r"^/api/quiz/(\d+)/(submit|skip)$", p)
+        if m:
+            qid, action = m.group(1), m.group(2)
+            url = "http://127.0.0.1:{}/api/quiz/{}/{}".format(HTTP_PORT, qid, action)
+            print("[操作] {} 测验 #{}".format("提交" if action == "submit" else "跳过", qid))
+            try:
+                return self._json(http_json(url, body if body else {}, timeout=180))
+            except Exception as exc:
+                return self._json({"ok": False, "error": str(exc)})
+
+        if p == "/api/ai-config":
+            saved = save_ai_config(body)
+            print("[操作] 保存 AI 配置 -> {} @ {}".format(saved["model"], saved["base_url"]))
+            return self._json({"ok": True, "config": ai_config_public(saved)})
+
+        # 「测一下能不能用」：用界面上的值临时拼一份配置去试，不用先保存。
+        if p == "/api/ai-config/test":
+            cfg = load_ai_config()
+            if isinstance(body, dict):
+                for k in ("base_url", "model"):
+                    v = body.get(k)
+                    if isinstance(v, str) and v.strip():
+                        cfg[k] = v.strip()
+                key = body.get("api_key")
+                if isinstance(key, str) and key.strip() and "****" not in key:
+                    cfg["api_key"] = key.strip()
+            print("[操作] 测试 AI 配置 -> {} @ {}".format(cfg["model"], ai_endpoint(cfg)))
+            return self._json(test_ai_config(cfg))
 
         if p == "/api/update/apply":
             if UPDATER is None:

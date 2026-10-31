@@ -62,6 +62,9 @@ const S = {
   logAutoScroll: true,
   enroll: { courses: null, picked: new Set(), loading: false },
   points: {},          // courseId -> {loading, data, error, at}
+  // 待确认测验：items 为后端原始行，answers 缓存用户在界面上的改动
+  // （pid -> {qid: answer}），不直接写回 items，免得重绘把用户输入冲掉。
+  quiz: { items: null, loading: false, error: '', answers: {}, ai: null, submitting: {} },
   busy: false,
 };
 
@@ -76,6 +79,7 @@ async function poll() {
       const first = !S.data;
       S.data = d;
       renderTopbar(d);
+      renderQuizBadge(d);
       // 首次拿到数据时任何视图都要重绘（否则直接落在 #settings 会一直显示「正在连接」）；
       // 之后只有总览/课程随轮询重绘，设置/选课/日志保留用户输入与滚动位置。
       if (first || S.view === 'overview' || S.view === 'courses') render();
@@ -109,6 +113,15 @@ function renderTopbar(d) {
     </span>`).join('');
 }
 
+/* 待确认小红点：轮询里更新，不随视图重绘，用户切到别的页也能看到还有几份没处理 */
+function renderQuizBadge(d) {
+  const el = $('#quiz-badge');
+  if (!el) return;
+  const n = d.quizPending || 0;
+  el.hidden = !n;
+  el.textContent = n > 99 ? '99+' : String(n);
+}
+
 /* ---------------- 视图分派 ---------------- */
 function render() {
   const d = S.data;
@@ -117,13 +130,15 @@ function render() {
 
   if (S.view === 'overview') v.innerHTML = viewOverview(d);
   else if (S.view === 'courses') v.innerHTML = viewCourses(d);
+  else if (S.view === 'quiz') v.innerHTML = viewQuiz(d);
   else if (S.view === 'enroll') v.innerHTML = viewEnroll(d);
   else if (S.view === 'settings') v.innerHTML = viewSettings(d);
   else if (S.view === 'logs') v.innerHTML = viewLogsShell(d);
 
   if (S.view === 'logs') renderLogs(d, false);
-  if (S.view === 'settings') renderUpdate(d);
+  if (S.view === 'settings') { renderUpdate(d); renderAiConfig(); }
   if (S.view === 'enroll') ensureEnrollCourses(d);
+  if (S.view === 'quiz') ensureQuizLoaded(d);
 }
 
 // 已经登录过（库里有 cookie）就不该逼用户再输一次密码才看得到课程。
@@ -407,12 +422,398 @@ function viewSettings(d) {
 
     <div class="panel" style="margin-top:var(--s4)">
       <div class="panel-head">
+        <span class="panel-title">AI 作答（章节测验）</span>
+        <span id="ai-status"></span>
+      </div>
+
+      <div id="ai-config-body">
+        <div class="form-grid">
+          <div class="form-2">
+            <div>
+              <label class="label" for="ai-base-url">接口地址</label>
+              <input class="field" id="ai-base-url" placeholder="https://api.siliconflow.cn/v1">
+            </div>
+            <div>
+              <label class="label" for="ai-model">模型</label>
+              <input class="field" id="ai-model" placeholder="Qwen/Qwen2.5-7B-Instruct">
+            </div>
+          </div>
+          <div class="form-2">
+            <div>
+              <label class="label" for="ai-key">API Key</label>
+              <input class="field" id="ai-key" type="password" placeholder="sk-...">
+            </div>
+            <div>
+              <label class="label" for="ai-timeout">超时（秒）</label>
+              <input class="field" id="ai-timeout" type="number" min="10" max="300" value="90">
+            </div>
+          </div>
+        </div>
+
+        <div class="hint" style="margin-top:var(--s3);line-height:1.8">
+          任何 OpenAI 兼容接口都能用：硅基流动 / DeepSeek / 通义 / 智谱 / 本地 Ollama。
+          硅基流动就填 <span class="mono">https://api.siliconflow.cn/v1</span> +
+          <span class="mono">Qwen/Qwen2.5-7B-Instruct</span>，一份 5 题的卷子大约 700 token，
+          一个学期的测验也就几分钱。<br>
+          保存后立即生效，不用重启后端。这里填的 key 只存在本机
+          <span class="mono" id="ai-path">app/ai-config.json</span>。
+        </div>
+
+        <div class="row" style="margin-top:var(--s3)">
+          <button class="btn btn-primary" data-act="save-ai">保存 AI 配置</button>
+          <button class="btn btn-ghost" data-act="test-ai">测一下能不能用</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:var(--s4)">
+      <div class="panel-head">
         <span class="panel-title">版本与更新</span>
         <span class="hint">旧文件备份在 <span class="mono">_update_backup_*</span> 目录，出错可回退</span>
       </div>
       <div id="update-body"></div>
     </div>
   </div>`;
+}
+
+/* ---------------- 待确认测验 ---------------- */
+// 刷课线程抓到章节测验就落一条待确认记录（status=1），抓崩了落 status=5。
+// 这里只负责「让人看一眼再交」—— 一次提交就定分，没有后悔药，
+// 所以界面上刻意没有「全部自动提交」这种东西。
+const QZ_TYPE_NAME = { single: '单选', multiple: '多选', judge: '判断', fill: '填空', short: '简答' };
+
+async function ensureQuizLoaded() {
+  if (S.quiz.loading || S.quiz.items !== null) return;
+  loadQuiz();
+}
+
+async function loadQuiz() {
+  if (S.quiz.loading) return;
+  S.quiz.loading = true;
+  S.quiz.error = '';
+  render();
+  try {
+    const [r, ai] = await Promise.all([api('/api/quiz?limit=30'), api('/api/ai-config')]);
+    if (ai && ai.ok) S.quiz.ai = ai.config;
+    if (r && r.code === 200 && Array.isArray(r.data)) {
+      S.quiz.items = r.data;
+    } else {
+      S.quiz.items = [];
+      S.quiz.error = (r && (r.error || r.msg)) || '读取待确认列表失败';
+    }
+  } catch (e) {
+    S.quiz.items = [];
+    S.quiz.error = String(e);
+  } finally {
+    S.quiz.loading = false;
+    render();
+  }
+}
+
+function quizQ(pid, qid) {
+  const p = (S.quiz.items || []).find(x => String(x.id) === String(pid));
+  if (!p) return null;
+  return (p.questions || []).find(q => String(q.id) === String(qid)) || null;
+}
+
+// 用户在界面上改的答案单独存在 S.quiz.answers 里，不写回 items ——
+// 否则每次重绘都会把「AI 建议」和「最终答案」搅在一起，分不清哪个是模型给的。
+//
+// manual 的题不能拿 suggestion 当默认值：那正是校验没通过、被否掉的答案，
+// 预选上等于把人往坑里带，必须留空让人自己选。
+function quizAnswer(pid, q) {
+  const box = S.quiz.answers[pid];
+  if (box && Object.prototype.hasOwnProperty.call(box, q.id)) return box[q.id];
+  if (q.answer) return String(q.answer);
+  return q.manual ? '' : String(q.suggestion || '');
+}
+
+function setQuizAnswer(pid, qid, val) {
+  if (!S.quiz.answers[pid]) S.quiz.answers[pid] = {};
+  S.quiz.answers[pid][qid] = val;
+}
+
+// 判断题的选项是 true. 对 / false. 错，value 必须原样用 true/false；
+// 选择题取首字母当 key，把 "A. 16" 里的 "A. " 剥掉当正文。
+function quizOptList(q) {
+  if (q.type === 'judge') {
+    return [{ value: 'true', key: '对', text: '' }, { value: 'false', key: '错', text: '' }];
+  }
+  return (q.options || []).map(o => {
+    const s = String(o).trim();
+    const m = s.match(/^([A-Za-z])[\s\.\、\．\)]*([\s\S]*)$/);
+    if (m) return { value: m[1].toUpperCase(), key: m[1].toUpperCase(), text: m[2].trim() };
+    return { value: s, key: s.slice(0, 1), text: s };
+  }).filter(o => o.value);
+}
+
+function paintQuizOpts(pid, qid) {
+  const q = quizQ(pid, qid);
+  if (!q) return;
+  const judge = q.type === 'judge';
+  const raw = String(quizAnswer(pid, q)).trim();
+  const cur = judge ? raw.toLowerCase() : raw.toUpperCase();
+  $$('.qz-opt').forEach(b => {
+    if (b.dataset.pid !== String(pid) || b.dataset.qid !== String(qid)) return;
+    b.classList.toggle('on', judge ? cur === b.dataset.letter : cur.includes(b.dataset.letter));
+  });
+}
+
+function viewQuiz(d) {
+  const st = S.quiz;
+
+  if (st.loading && st.items === null) {
+    return `<div class="view-inner"><div class="panel"><div class="empty">正在读取待确认的测验…</div></div></div>`;
+  }
+  if (st.error) {
+    return `<div class="view-inner"><div class="panel"><div class="empty">
+      ${esc(st.error)}
+      <button class="btn" data-act="quiz-reload" style="margin-top:var(--s3)">重试</button>
+    </div></div></div>`;
+  }
+
+  const items = st.items || [];
+  if (!items.length) {
+    return `<div class="view-inner"><div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">待确认的章节测验</span>
+        <button class="btn btn-ghost btn-sm" data-act="quiz-reload">刷新</button>
+      </div>
+      <div class="empty">
+        现在没有要处理的测验
+        <span class="hint">刷课碰到章节测验会自动抓题、让 AI 先出一份答案，抓到的都会列在这里等你过一眼。</span>
+      </div>
+    </div></div>`;
+  }
+
+  const ai = st.ai || {};
+  const warn = ai.has_key ? '' : `<div class="panel" style="border-color:var(--warn)">
+    <div class="panel-head" style="border-bottom-color:var(--warn-dim)">
+      <span class="panel-title" style="color:var(--warn)">AI 还没配 key</span>
+    </div>
+    <div class="hint">
+      下面这些卷子的答案要么是空的，要么标了「需人工」。
+      去「设置 → AI 作答」填一个 key 并保存，之后新抓到的测验才会自动出答案。
+    </div>
+  </div>`;
+
+  return `<div class="view-inner">
+    ${warn}
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">待确认的章节测验 · ${items.length} 份</span>
+        <span class="row" style="gap:var(--s2)">
+          <span class="faint" style="font-size:var(--t-xs)">AI 只给建议，交之前请自己看一遍</span>
+          <button class="btn btn-ghost btn-sm" data-act="quiz-reload">刷新</button>
+        </span>
+      </div>
+      <div class="hint">
+        提交后不能撤销、不能重做，答案立刻计分。拿不准的题直接在选项上改，改完再交。
+      </div>
+    </div>
+    ${items.map(p => viewQuizPaper(p)).join('')}
+  </div>`;
+}
+
+function viewQuizPaper(p) {
+  const qs = p.questions || [];
+  const broken = p.status === 5;
+  const manual = qs.filter(q => q.manual).length;
+
+  const tags = [broken
+    ? '<span class="tag tag-err">抓题失败</span>'
+    : '<span class="tag tag-accent">待确认</span>'];
+  if (manual) tags.push(`<span class="tag tag-err">${manual} 题需人工</span>`);
+
+  const body = qs.length
+    ? qs.map((q, i) => viewQuizQuestion(p, q, i)).join('')
+    : `<div class="empty" style="padding:var(--s5) 0">
+         ${esc(p.error_message || '这份卷子没解析出题目')}
+         <span class="hint">抓到的原始页面存在 app/quiz-dump/ 下</span>
+       </div>`;
+
+  const ops = qs.length
+    ? `<div class="qz-actions" style="margin-top:var(--s4)">
+         <button class="btn btn-primary" data-act="quiz-submit" data-id="${p.id}">
+           提交这份（${qs.length} 题）
+         </button>
+         <button class="btn btn-danger" data-act="quiz-skip" data-id="${p.id}">跳过</button>
+       </div>`
+    : `<div class="qz-actions" style="margin-top:var(--s4)">
+         <button class="btn" data-act="quiz-skip" data-id="${p.id}">跳过这条</button>
+       </div>`;
+
+  return `<div class="panel qz-paper" data-pid="${p.id}">
+    <div class="panel-head">
+      <span class="panel-title">${esc(p.course_name || '—')} · ${esc(p.title || '章节测验')}</span>
+      <span class="row" style="gap:var(--s1)">${tags.join('')}</span>
+    </div>
+    ${body}
+    ${ops}
+  </div>`;
+}
+
+function viewQuizQuestion(p, q, idx) {
+  const opts = quizOptList(q);
+  const judge = q.type === 'judge';
+  const raw = String(quizAnswer(p.id, q)).trim();
+  const cur = judge ? raw.toLowerCase() : raw.toUpperCase();
+  const typeName = QZ_TYPE_NAME[q.type] || q.type || '';
+
+  let control;
+  if (opts.length) {
+    control = `<div class="qz-opts">` + opts.map(o => {
+      const on = judge ? cur === o.value : cur.includes(o.value);
+      return `<button class="qz-opt ${on ? 'on' : ''}" data-act="qz-pick"
+                data-pid="${p.id}" data-qid="${esc(q.id)}" data-letter="${esc(o.value)}">
+        <span class="qz-opt-key">${esc(o.key)}</span>
+        ${o.text ? `<span class="qz-opt-text">${esc(o.text)}</span>` : ''}
+      </button>`;
+    }).join('') + `</div>`;
+  } else {
+    control = `<div class="qz-opts">
+      <input class="field" data-act="qz-fill" data-pid="${p.id}" data-qid="${esc(q.id)}"
+             value="${esc(raw)}"
+             placeholder="${q.type === 'short' ? '写一段简答' : '填答案；多个空用 ||| 分隔'}">
+    </div>`;
+  }
+
+  const aiBits = [];
+  if (q.suggestion) aiBits.push(`AI 建议 <b>${esc(q.suggestion)}</b>`);
+  if (q.confidence) {
+    aiBits.push(`<span class="qz-conf qz-conf-${esc(q.confidence)}">${esc(q.confidence)}</span>`);
+  }
+  if (q.reason) aiBits.push(esc(q.reason));
+  if (q.note) aiBits.push(`<span class="qz-note">${esc(q.note)}</span>`);
+  const aiLine = aiBits.length ? `<div class="qz-ai">${aiBits.join(' · ')}</div>` : '';
+
+  return `<div class="qz-q ${q.manual ? 'is-manual' : ''}">
+    <div class="qz-head">
+      <span class="qz-no">${idx + 1}.</span>
+      <span class="qz-title">
+        ${typeName ? `<span class="tag" style="margin-right:6px">${esc(typeName)}</span>` : ''}
+        ${esc(q.title)}
+      </span>
+    </div>
+    ${control}
+    ${aiLine}
+  </div>`;
+}
+
+function paintQuizBusy(pid, busy) {
+  $$('.qz-paper').forEach(el => {
+    if (el.dataset.pid !== String(pid)) return;
+    $$('button', el).forEach(b => { b.disabled = busy; });
+  });
+}
+
+async function doQuizSubmit(pid) {
+  const p = (S.quiz.items || []).find(x => String(x.id) === String(pid));
+  if (!p) return;
+  const qs = p.questions || [];
+  if (!qs.length) { toast('这份没有题目，直接跳过吧', 'err'); return; }
+
+  const answers = {};
+  const missing = [];
+  qs.forEach((q, i) => {
+    const a = String(quizAnswer(pid, q)).trim();
+    if (!a) missing.push(i + 1);
+    answers[q.id] = a;
+  });
+  if (missing.length) {
+    toast(`第 ${missing.join('、')} 题还没有答案`, 'err');
+    return;
+  }
+
+  const manual = qs.filter(q => q.manual).length;
+  const msg = `提交「${p.course_name || ''} · ${p.title || '章节测验'}」？\n\n`
+    + `共 ${qs.length} 题${manual ? `，其中 ${manual} 题 AI 没把握` : ''}。\n\n`
+    + '提交后不能撤销、不能重做，答案会立刻计分。';
+  if (!confirm(msg)) return;
+
+  paintQuizBusy(pid, true);
+  const r = await api(`/api/quiz/${pid}/submit`, { method: 'POST', body: { answers } });
+  const ok = !!(r && ((r.data && r.data.ok) || r.ok === true || r.code === 200));
+  const why = (r && ((r.data && r.data.message) || r.msg || r.error)) || '未知错误';
+  toast(ok ? '已提交' : '提交失败：' + why, ok ? 'ok' : 'err');
+  if (ok) {
+    S.quiz.items = (S.quiz.items || []).filter(x => String(x.id) !== String(pid));
+    delete S.quiz.answers[pid];
+    render();
+    poll();
+  } else {
+    paintQuizBusy(pid, false);
+  }
+}
+
+async function doQuizSkip(pid) {
+  if (!confirm('跳过这份测验？\n\n跳过后不会再出现在这个列表里，你随时可以去超星网页上自己补做。')) return;
+  paintQuizBusy(pid, true);
+  const r = await api(`/api/quiz/${pid}/skip`, { method: 'POST', body: { reason: '界面跳过' } });
+  const ok = !!(r && (r.code === 200 || r.ok === true));
+  toast(ok ? '已跳过' : '跳过失败：' + ((r && (r.msg || r.error)) || '未知错误'), ok ? 'ok' : 'err');
+  if (ok) {
+    S.quiz.items = (S.quiz.items || []).filter(x => String(x.id) !== String(pid));
+    delete S.quiz.answers[pid];
+    render();
+    poll();
+  } else {
+    paintQuizBusy(pid, false);
+  }
+}
+
+/* ---------------- AI 配置（设置页） ---------------- */
+async function renderAiConfig() {
+  const r = await api('/api/ai-config');
+  const box = $('#ai-config-body');
+  if (!box) return;
+  if (!r || !r.ok) {
+    box.insertAdjacentHTML('afterbegin',
+      `<div class="hint" style="color:var(--err);margin-bottom:var(--s2)">读取配置失败：${esc((r && r.error) || '未知错误')}</div>`);
+    return;
+  }
+  const c = r.config || {};
+  S.quiz.ai = c;
+  const put = (id, v) => { const el = $('#' + id); if (el) el.value = v; };
+  put('ai-base-url', c.base_url || '');
+  put('ai-model', c.model || '');
+  put('ai-key', c.api_key || '');
+  put('ai-timeout', c.timeout_sec || 90);
+  const st = $('#ai-status');
+  if (st) {
+    st.innerHTML = c.has_key
+      ? `<span class="tag tag-ok">已配置</span>`
+      : `<span class="tag tag-err">未配置</span>`;
+  }
+  const p = $('#ai-path');
+  if (p && c.path) p.textContent = c.path;
+}
+
+function collectAiConfig() {
+  const val = id => (($('#' + id) || {}).value || '').trim();
+  return {
+    base_url: val('ai-base-url'),
+    model: val('ai-model'),
+    api_key: val('ai-key'),
+    timeout_sec: Number(val('ai-timeout')) || 90,
+  };
+}
+
+async function doSaveAiConfig() {
+  const r = await api('/api/ai-config', { method: 'POST', body: collectAiConfig() });
+  if (!r || !r.ok) { toast('保存失败：' + ((r && r.error) || '未知错误'), 'err'); return; }
+  S.quiz.ai = r.config;
+  toast(r.config.has_key ? 'AI 配置已保存，下份测验就会用它' : '已保存，但 api_key 还是空的', r.config.has_key ? 'ok' : 'err');
+  renderAiConfig();
+}
+
+async function doTestAiConfig() {
+  const btn = $('[data-act="test-ai"]');
+  if (btn) { btn.disabled = true; btn.textContent = '正在测…'; }
+  const r = await api('/api/ai-config/test', { method: 'POST', body: collectAiConfig() });
+  if (btn) { btn.disabled = false; btn.textContent = '测一下能不能用'; }
+  if (r && r.ok) toast(`通了：${r.ms}ms，模型回「${r.reply}」`, 'ok');
+  else toast('不通：' + ((r && r.error) || '未知错误'), 'err');
 }
 
 /* ---------------- 日志 ---------------- */
@@ -877,6 +1278,34 @@ document.addEventListener('click', async (e) => {
   if (act === 'save-settings') return doSaveSettings();
   if (act === 'update-check') return doUpdateCheck();
   if (act === 'update-apply') return doUpdateApply(el.dataset.mode);
+
+  // ---- 待确认测验
+  if (act === 'qz-pick') {
+    const pid = el.dataset.pid, qid = el.dataset.qid;
+    const q = quizQ(pid, qid);
+    if (!q) return;
+    const letter = el.dataset.letter;
+    if (q.type === 'multiple') {
+      // 多选是开关：再点一次取消，最后按字母序拼起来交给后端
+      const picked = String(quizAnswer(pid, q)).toUpperCase()
+        .split('').filter(c => /[A-Z]/.test(c));
+      const i = picked.indexOf(letter);
+      if (i >= 0) picked.splice(i, 1); else picked.push(letter);
+      picked.sort();
+      setQuizAnswer(pid, qid, picked.join(''));
+    } else {
+      setQuizAnswer(pid, qid, letter);
+    }
+    paintQuizOpts(pid, qid);
+    return;
+  }
+  if (act === 'quiz-reload') { S.quiz.items = null; return loadQuiz(); }
+  if (act === 'quiz-submit') return doQuizSubmit(el.dataset.id);
+  if (act === 'quiz-skip') return doQuizSkip(el.dataset.id);
+
+  // ---- AI 配置
+  if (act === 'save-ai') return doSaveAiConfig();
+  if (act === 'test-ai') return doTestAiConfig();
 });
 
 document.addEventListener('change', (e) => {
@@ -897,6 +1326,12 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'log-filter') {
     S.logFilter = e.target.value;
     renderLogs(S.data, false);
+    return;
+  }
+  // 填空/简答：只记进 state，不重绘 —— 一重绘输入框就失焦，没法连续打字
+  const el = e.target;
+  if (el.dataset && el.dataset.act === 'qz-fill') {
+    setQuizAnswer(el.dataset.pid, el.dataset.qid, el.value);
   }
 });
 
@@ -921,7 +1356,7 @@ $('#btn-open').addEventListener('click', () => {
 });
 
 /* ---------------- 启动 ---------------- */
-const VIEWS = ['overview', 'courses', 'enroll', 'settings', 'logs'];
+const VIEWS = ['overview', 'courses', 'quiz', 'enroll', 'settings', 'logs'];
 function applyHash() {
   const v = (location.hash || '').replace('#', '');
   if (VIEWS.includes(v) && v !== S.view) {

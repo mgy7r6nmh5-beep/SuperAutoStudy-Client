@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -86,19 +87,45 @@ public class AiAnswerService {
         List<QuizQuestion> pending = new ArrayList<>(questions);
         // 第一轮
         ask(cfg, pending, courseName);
-        // 校验不过的单独重试一次：模型对单题往往比批量更专注
+        // 校验不过的重试一次：模型对单题往往比批量更专注
         List<QuizQuestion> retry = new ArrayList<>();
         for (QuizQuestion q : questions) {
             if (q.isManual()) {
                 retry.add(q);
             }
         }
-        if (!retry.isEmpty() && retry.size() < questions.size()) {
+        if (!retry.isEmpty()) {
+            // 先看第一轮是怎么失败的，再决定要不要重试 —— 顺序不能反：
+            // 下面清 note 的那一步会把失败原因抹掉，清完再判断就永远是「没问题」。
+            //
+            // 如果是 key 错、地址不通这类「请求本身发不出去」的失败，一题一问只会
+            // 把同一个错误重复 N 遍，每次都等满超时。抓题跑在刷课线程上，
+            // 一份 20 题的卷子能卡二十分钟，整门课的进度全停 —— 这种一律不重试。
+            boolean transportBroken = false;
+            for (QuizQuestion q : questions) {
+                String n = q.getNote() == null ? "" : q.getNote();
+                if (n.startsWith("AI 调用失败") || n.startsWith("AI 未配置")
+                        || n.startsWith("构造请求失败")) {
+                    transportBroken = true;
+                    break;
+                }
+            }
             for (QuizQuestion q : retry) {
                 q.setManual(false);
                 q.setNote("");
             }
-            ask(cfg, retry, courseName);
+            if (transportBroken) {
+                markAll(questions, "AI 不可用，先去看设置里的接口地址 / key / 模型");
+            } else if (retry.size() == questions.size() && questions.size() > 1) {
+                // 整批全挂通常意味着回复被截断、JSON 崩了（便宜的小模型很常见），
+                // 这时候原样再批量问一遍大概率还是崩。改成一题一问：prompt 短、输出也短，
+                // 截断的风险基本没了，代价只是多几个请求 —— 小模型按 token 算，很便宜。
+                for (QuizQuestion q : retry) {
+                    ask(cfg, new ArrayList<>(Collections.singletonList(q)), courseName);
+                }
+            } else {
+                ask(cfg, retry, courseName);
+            }
         }
         // 还是不行就保持 manual
         for (QuizQuestion q : questions) {
@@ -273,6 +300,10 @@ public class AiAnswerService {
         root.put("model", cfg.model);
         root.put("temperature", 0.2);
         root.put("stream", false);
+        // 一定要显式给 max_tokens。不给的话走服务商默认值（有的只有 512），
+        // 一份二十题的卷子必然被截断，模型吐出来的 JSON 是半截的，
+        // 解析直接崩、整批作废。按题数估：每题留 150 token，再加 200 的余量。
+        root.put("max_tokens", Math.max(600, Math.min(4096, 200 + batch.size() * 150)));
 
         ArrayNode msgs = root.putArray("messages");
         ObjectNode sys = msgs.addObject();
@@ -327,9 +358,23 @@ public class AiAnswerService {
                 throw new IllegalStateException("HTTP " + resp.code() + " " + brief(body, 200));
             }
             JsonNode root = MAPPER.readTree(body);
-            JsonNode content = root.path("choices").path(0).path("message").path("content");
+            JsonNode choice = root.path("choices").path(0);
+            JsonNode content = choice.path("message").path("content");
             if (content.isMissingNode() || content.asText().isEmpty()) {
                 throw new IllegalStateException("响应里没有 content: " + brief(body, 200));
+            }
+            // 被截断时 content 是半截 JSON，后面的解析只会报一句莫名其妙的
+            // "Unexpected close marker '}'"，不如在这里就把话说清楚。
+            if ("length".equals(choice.path("finish_reason").asText())) {
+                throw new IllegalStateException("模型回复被截断（max_tokens 不够）");
+            }
+            JsonNode usage = root.path("usage");
+            if (!usage.isMissingNode()) {
+                // 便宜模型按 token 计费，留一行账在日志里，用户能自己算花了多少
+                log.info("AI 作答用量: prompt={} completion={} total={}",
+                        usage.path("prompt_tokens").asInt(),
+                        usage.path("completion_tokens").asInt(),
+                        usage.path("total_tokens").asInt());
             }
             return content.asText();
         }
