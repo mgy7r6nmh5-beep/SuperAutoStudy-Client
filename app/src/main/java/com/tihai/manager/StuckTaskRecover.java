@@ -66,11 +66,13 @@ public class StuckTaskRecover implements ApplicationListener<ApplicationReadyEve
 
     private void recover() {
         int done = syncFinishedFromLog();
+        int stale = fixStaleLogs();
         int reset = resetOrphans();
         int retry = retryAbnormal();
 
-        if (done + reset + retry > 0) {
-            log.warn("启动自愈：同步已完成 {} 个 / 重置中断 {} 个 / 重试失败 {} 个", done, reset, retry);
+        if (done + stale + reset + retry > 0) {
+            log.warn("启动自愈：同步已完成 {} 个 / 修正僵尸日志 {} 个 / 重置中断 {} 个 / 重试失败 {} 个",
+                    done, stale, reset, retry);
         } else {
             log.info("启动自愈：没有需要恢复的任务");
         }
@@ -103,6 +105,27 @@ public class StuckTaskRecover implements ApplicationListener<ApplicationReadyEve
                 WkTaskStatusEnum.QUEUE.getCode(),
                 WkTaskStatusEnum.EXAM.getCode(),
                 WkTaskStatusEnum.PAUSED.getCode(),
+                WkTaskStatusEnum.FINISHED.getCode());
+    }
+
+    /**
+     * ①b 日志行停在「进行中(1)」、队列却已经是「已完成(4)」→ 把日志补成 4。
+     *
+     * <p>成因：后端跑完一门课是先写 {@code th_wk_queue.status}，再写 {@code th_wk_log}。
+     * 如果进程在两次写之间被强杀（点「停止服务」/ OTA 更新 / 崩溃），日志那次写就丢了。
+     * 客户端只看日志状态，于是这门课永远显示「进行中」，点进去却一条当前任务都没有
+     * —— 因为它其实早就刷完了。队列状态是流程真正走完才写的，比日志可靠，以它为准。
+     */
+    private int fixStaleLogs() {
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        return jdbc.update(
+                "UPDATE th_wk_log l "
+                        + "  JOIN th_wk_queue q ON q.id = l.id "
+                        + "   SET l.status = ?, l.current_progress = 100, "
+                        + "       l.end_time = IFNULL(l.end_time, NOW()), l.error_message = NULL "
+                        + " WHERE l.status = ? AND q.status = ?",
+                WkTaskStatusEnum.FINISHED.getCode(),
+                WkTaskStatusEnum.PROCESSING.getCode(),
                 WkTaskStatusEnum.FINISHED.getCode());
     }
 

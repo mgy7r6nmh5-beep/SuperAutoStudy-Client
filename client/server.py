@@ -1080,8 +1080,19 @@ def update_public_state():
 # ------------------------------------------------------------------ API
 
 
-def status_of(lstatus, qstatus, errmsg, lstart, backend_started):
+def status_of(lstatus, qstatus, errmsg, lstart, backend_started, lend=None):
     """把 (日志状态, 队列状态, 错误信息) 归并成界面上的一个状态标签。"""
+    # 日志说「进行中」，但队列已经是「已完成」——这是僵尸行。
+    # 后端跑完一门课会先更新 th_wk_queue.status=4，再写 th_wk_log；
+    # 如果进程在中途被强杀（点停止服务 / OTA 更新 / 崩溃），日志那次写就丢了，
+    # 于是日志永远停在 1。界面只看日志，就会一直显示「进行中」，
+    # 点进课程里却什么任务都没有（因为它其实已经刷完了）。
+    # 队列状态是后端流程真正走完才写的，比日志可靠，这里以它为准。
+    if lstatus == 1 and qstatus == 4:
+        return "ok", "已完成"
+    if lstatus == 1 and lend is not None and qstatus != 1:
+        # 有结束时间但状态没改，同样是写库丢了一次
+        return "ok", "已完成"
     if lstatus == 1:
         return "run", "进行中"
     if (qstatus == 2 and lstart is not None and backend_started is not None
@@ -1145,7 +1156,7 @@ def build_state():
             for (qid, course_id, course_name, qstatus, priority, retry,
                  creat_time, chap, prog, lstatus, cur_job, errmsg, remark,
                  lstart, lend, chap_id, failed_chapters, video_pos) in rows:
-                tag, text = status_of(lstatus, qstatus, errmsg, lstart, backend_started)
+                tag, text = status_of(lstatus, qstatus, errmsg, lstart, backend_started, lend)
                 try:
                     pct = float(prog) if prog is not None else 0.0
                 except (TypeError, ValueError):
