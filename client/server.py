@@ -554,6 +554,10 @@ AI_BASE_URL = "https://api.deepseek.com"
 AI_MODEL = "deepseek-chat"
 AI_TIMEOUT_SEC = 60
 
+# 答题策略。必须和 Java 侧 com.tihai.constant.QuizMode 的取值一字不差 ——
+# 客户端只负责把值写进 ai-config.json，真正执行的是后端。
+ANSWER_MODES = ("off", "confirm", "auto_high", "auto_medium", "auto_any")
+
 
 def ai_config_path():
     return os.path.join(SVC.appdir, "ai-config.json")
@@ -562,7 +566,7 @@ def ai_config_path():
 def load_ai_config():
     """读 AI 配置；文件不存在时返回默认值（api_key 为空 = 未配置）。"""
     cfg = {"base_url": AI_BASE_URL, "api_key": "", "model": AI_MODEL,
-           "timeout_sec": AI_TIMEOUT_SEC}
+           "timeout_sec": AI_TIMEOUT_SEC, "answer_mode": "confirm"}
     try:
         with open(ai_config_path(), "r", encoding="utf-8") as f:
             saved = json.load(f)
@@ -577,6 +581,9 @@ def load_ai_config():
             cfg["timeout_sec"] = int(saved.get("timeout_sec") or AI_TIMEOUT_SEC)
         except (TypeError, ValueError):
             pass
+        mode = saved.get("answer_mode")
+        if isinstance(mode, str) and mode.strip().lower() in ANSWER_MODES:
+            cfg["answer_mode"] = mode.strip().lower()
     return cfg
 
 
@@ -602,6 +609,9 @@ def save_ai_config(patch):
             cfg["timeout_sec"] = max(10, min(300, t))
         except (TypeError, ValueError):
             pass
+        mode = patch.get("answer_mode")
+        if isinstance(mode, str) and mode.strip().lower() in ANSWER_MODES:
+            cfg["answer_mode"] = mode.strip().lower()
     path = ai_config_path()
     d = os.path.dirname(path)
     if d and not os.path.isdir(d):
@@ -626,6 +636,7 @@ def ai_config_public(cfg):
         "base_url": cfg["base_url"],
         "model": cfg["model"],
         "timeout_sec": cfg["timeout_sec"],
+        "answer_mode": cfg.get("answer_mode", "confirm"),
         "api_key": mask_key(cfg["api_key"]),
         "has_key": bool(cfg["api_key"]),
         "path": ai_config_path(),

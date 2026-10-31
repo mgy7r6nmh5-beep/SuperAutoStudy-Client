@@ -448,6 +448,17 @@ function viewSettings(d) {
               <input class="field" id="ai-timeout" type="number" min="10" max="300" value="90">
             </div>
           </div>
+          <div style="margin-top:var(--s3)">
+            <label class="label" for="ai-answer-mode">答题策略</label>
+            <select class="field" id="ai-answer-mode">
+              <option value="confirm">全部人工确认（默认）</option>
+              <option value="auto_high">自动提交 · 全部 high</option>
+              <option value="auto_medium">自动提交 · ≥ medium</option>
+              <option value="auto_any">自动提交 · 能答就交</option>
+              <option value="off">关闭答题</option>
+            </select>
+            <div class="hint" id="ai-mode-desc" style="margin-top:var(--s2);line-height:1.7"></div>
+          </div>
         </div>
 
         <div class="hint" style="margin-top:var(--s3);line-height:1.8">
@@ -763,6 +774,24 @@ async function doQuizSkip(pid) {
 }
 
 /* ---------------- AI 配置（设置页） ---------------- */
+
+// 策略说明。键必须和后端 QuizMode 的取值一致 —— 这边只负责写进
+// app/ai-config.json，真正执行的是 Java 那边。
+const QUIZ_MODE_DESC = {
+  confirm: '抓到题、AI 出完答案就挂到「待确认」，你逐题看过再点提交。最稳，但得有人盯着。',
+  auto_high: '每道题都过了校验、且 AI 自评全是 high 才自动交；只要有一道没把握，整份退回「待确认」。',
+  auto_medium: '门槛放宽到 medium，那些「大概率对」的也一起交掉。可能有个别错题，但不用天天盯着。',
+  auto_any: '只要能答出来就交，包含 AI 自评 low 的题。完全不想管的时候用，错了不负责。',
+  off: '遇到章节测验直接跳过，和 v1.0.8 之前一样。「待确认」页会一直是空的。',
+};
+
+function renderQuizModeDesc() {
+  const sel = $('#ai-answer-mode');
+  const box = $('#ai-mode-desc');
+  if (!sel || !box) return;
+  box.textContent = QUIZ_MODE_DESC[sel.value] || '';
+}
+
 async function renderAiConfig() {
   const r = await api('/api/ai-config');
   const box = $('#ai-config-body');
@@ -779,6 +808,8 @@ async function renderAiConfig() {
   put('ai-model', c.model || '');
   put('ai-key', c.api_key || '');
   put('ai-timeout', c.timeout_sec || 90);
+  put('ai-answer-mode', c.answer_mode || 'confirm');
+  renderQuizModeDesc();
   const st = $('#ai-status');
   if (st) {
     st.innerHTML = c.has_key
@@ -796,6 +827,7 @@ function collectAiConfig() {
     model: val('ai-model'),
     api_key: val('ai-key'),
     timeout_sec: Number(val('ai-timeout')) || 90,
+    answer_mode: val('ai-answer-mode') || 'confirm',
   };
 }
 
@@ -1320,6 +1352,7 @@ document.addEventListener('change', (e) => {
   }
   if (el.id === 'log-only-err') { S.logOnlyErr = el.checked; renderLogs(S.data, false); }
   if (el.id === 'log-auto') { S.logAutoScroll = el.checked; }
+  if (el.id === 'ai-answer-mode') { renderQuizModeDesc(); }
 });
 
 document.addEventListener('input', (e) => {

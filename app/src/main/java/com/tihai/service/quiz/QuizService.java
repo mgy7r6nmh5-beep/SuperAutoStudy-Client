@@ -5,6 +5,7 @@ import com.tihai.common.Job;
 import com.tihai.common.JobInfo;
 import com.tihai.common.QuizPaper;
 import com.tihai.common.QuizQuestion;
+import com.tihai.constant.QuizMode;
 import com.tihai.dubbo.pojo.course.Course;
 import com.tihai.service.ai.AiAnswerService;
 import com.tihai.utils.CourseUtil;
@@ -115,6 +116,35 @@ public class QuizService {
                     manual++;
                 }
             }
+
+            // 策略是 auto_* 且整份卷子每道题都过了校验并达到置信度门槛 → 直接交。
+            // 只要有一道题没把握，就整份挂回「待确认」等人看：提交不可逆，
+            // 交错的代价比漏交大得多。
+            String mode = AiAnswerService.Config.load().answerMode;
+            if (manual == 0 && QuizMode.auto(mode)
+                    && confidentEnough(paper, QuizMode.minConfidenceRank(mode))) {
+                Map<String, String> answers = new LinkedHashMap<>();
+                for (QuizQuestion q : paper.getQuestions()) {
+                    answers.put(q.getId(), q.getAnswer());
+                }
+                boolean ok;
+                try {
+                    ok = courseUtil.submitQuiz(paper, answers);
+                } catch (Exception e) {
+                    ok = false;
+                    log.warn("自动提交异常 {} / {}: {}", course.getTitle(), job.getTitle(), e.toString());
+                }
+                if (ok) {
+                    log.info("自动提交成功: {} / {}（{} 题，策略 {}）",
+                            course.getTitle(), job.getTitle(), paper.size(), QuizMode.label(mode));
+                    return saveRaw(account, course, job, paper, STATUS_SUBMITTED,
+                            "AI 自动提交成功（" + QuizMode.label(mode) + "）");
+                }
+                // 交失败了别丢：退回待确认，让人手工点一次，顺便能看到服务端到底说了什么
+                return saveRaw(account, course, job, paper, STATUS_PENDING,
+                        "AI 自动提交被服务端拒绝，请人工确认后重试");
+            }
+
             String note = manual > 0 ? (manual + " 题 AI 没把握，需人工") : null;
             return saveRaw(account, course, job, paper, STATUS_PENDING, note);
         } catch (Exception e) {
@@ -154,6 +184,38 @@ public class QuizService {
             return false;
         }
         return true;
+    }
+
+    /**
+     * 这份卷子够不够格自动交：每道题都有答案，且置信度都不低于门槛。
+     *
+     * <p>置信度是模型自己报的，空值/认不出的值一律当「不够格」——
+     * 宁可让人看一眼，也不拿一个不知道是什么的东西去交卷。
+     */
+    private boolean confidentEnough(QuizPaper paper, int minRank) {
+        for (QuizQuestion q : paper.getQuestions()) {
+            String a = q.getAnswer();
+            if (a == null || a.trim().isEmpty()) {
+                return false;
+            }
+            if (confidenceRank(q.getConfidence()) < minRank) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int confidenceRank(String c) {
+        if ("high".equalsIgnoreCase(c)) {
+            return 3;
+        }
+        if ("medium".equalsIgnoreCase(c)) {
+            return 2;
+        }
+        if ("low".equalsIgnoreCase(c)) {
+            return 1;
+        }
+        return 0;
     }
 
     private long saveRaw(String account, Course course, Job job, QuizPaper paper,

@@ -469,6 +469,16 @@ public class AiAnswerService {
         public String model = "deepseek-chat";
         public int timeoutSec = 60;
 
+        /**
+         * 答题策略，取值见 {@link com.tihai.constant.QuizMode}。
+         *
+         * <p>默认 {@code confirm}：抓题 + AI 出答案 + 落库，全部挂「待确认」等人点。
+         * 想无人值守就把模式调成 {@code auto_*}，只有**每道题都过了校验、且置信度都不低于
+         * 门槛**时才自动交；只要有一道没把握，整份照旧挂回待确认。
+         * 提交不可逆，所以宁可漏交也不要交错。
+         */
+        public String answerMode = com.tihai.constant.QuizMode.CONFIRM;
+
         public boolean usable() {
             return apiKey != null && !apiKey.trim().isEmpty();
         }
@@ -500,6 +510,10 @@ public class AiAnswerService {
                 cfg.apiKey = n.path("api_key").asText("");
                 cfg.model = n.path("model").asText(cfg.model);
                 cfg.timeoutSec = n.path("timeout_sec").asInt(cfg.timeoutSec);
+                String mode = n.path("answer_mode").asText("").trim().toLowerCase();
+                if (com.tihai.constant.QuizMode.valid(mode)) {
+                    cfg.answerMode = mode;
+                }
             } catch (Exception e) {
                 log.warn("读 {} 失败: {}", CONFIG_FILE, e.toString());
             }

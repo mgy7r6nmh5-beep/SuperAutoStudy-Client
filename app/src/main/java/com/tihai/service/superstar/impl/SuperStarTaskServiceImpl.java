@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.tihai.common.*;
 import com.tihai.constant.GlobalConstant;
 import com.tihai.constant.JobTypeConstant;
+import com.tihai.constant.QuizMode;
 import com.tihai.constant.StudyPolicy;
 import com.tihai.domain.chaoxing.SuperStarLog;
 import com.tihai.domain.chaoxing.SuperStarTask;
@@ -19,6 +20,7 @@ import com.tihai.exception.BusinessException;
 import com.tihai.factory.CustomThreadFactory;
 import com.tihai.factory.PriorityRejectPolicy;
 import com.tihai.manager.RollBackManager;
+import com.tihai.service.ai.AiAnswerService;
 import com.tihai.mapper.SuperStarMapper;
 
 import com.tihai.properties.ThreadPoolProperties;
@@ -930,17 +932,31 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
      *
      * <p>**这里不能等用户确认。** 刷课线程核心线程数是 1（单课串行是硬约束），
      * 一旦在这里阻塞等人点按钮，整门课就停了。所以只把卷子准备好，
-     * 提交交给界面上点「确认」时走 {@code QuizController}。
+     * 提交交给界面上点「确认」时走 {@code QuizController}；
+     * 如果用户把策略调成了 {@code auto_*}，{@code QuizService.prepare} 会自己交掉。
      *
      * <p>任何异常都吞掉：做题失败不能让整门课的刷课跟着崩。
      */
     private void prepareQuiz(Course course, Job job, JobInfo jobInfo, SuperStarLog log) {
         String who = Thread.currentThread().getName();
         try {
-            System.out.println(who + "[quiz] 准备测验: "
+            // 策略为 off 时连抓题都不做，直接跳过 —— 和 v1.0.8 之前的行为一致。
+            // 放在这里而不是两个调用点，是因为这个方法的两个入口都要走这一步。
+            String mode = AiAnswerService.Config.load().answerMode;
+            if (QuizMode.isOff(mode)) {
+                System.out.println(who + "[skip]答题功能已关闭，跳过[workid]: "
+                        + course.getTitle() + " / " + job.getTitle());
+                return;
+            }
+            System.out.println(who + "[quiz] 准备测验（策略 " + QuizMode.label(mode) + "）: "
                     + course.getTitle() + " / " + job.getTitle());
             long id = quizService.prepare(course, job, jobInfo, log.getLoginAccount());
-            System.out.println(who + "[quiz] 已生成待确认卷 #" + id + ": " + job.getTitle());
+            if (id > 0) {
+                System.out.println(who + "[quiz] 已处理，记录 #" + id + ": " + job.getTitle());
+            } else {
+                // -1：已交过 / 已有关记录 / 本次自动提交完成，三种都不用再提示
+                System.out.println(who + "[quiz] 无需人工处理: " + job.getTitle());
+            }
         } catch (Throwable t) {
             System.out.println(who + "[quiz] 准备测验失败（已跳过）: " + t);
         }
