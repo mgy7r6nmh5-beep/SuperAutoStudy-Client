@@ -115,8 +115,8 @@ ClassCastException: com.tihai.service.superstar.impl.SuperStarTaskServiceImpl$$L
 
 | 文件 | 大小 | SHA256 |
 |---|---|---|
-| `SuperAutoStudy-Setup-1.0.18.exe` | 109.6 MB | `f8d109b494aa4d219580ef90837090d10e4b51aa837e1ab013f15e95350882bb` |
-| `SuperAutoStudy-portable-1.0.18.zip` | 191.9 MB | `d8a83041558f6bf268af42ab2441cca4a9eca5947e46a550bff9be09d5424d11` |
+| `SuperAutoStudy-Setup-1.0.18.exe` | 109.6 MB | `0d5e9ee0a60fa2c8cf4f21a06c12fc4eab36a778dd5d6889de2400efa76dfefd` |
+| `SuperAutoStudy-portable-1.0.18.zip` | 191.9 MB | `d93675598b4b105f8649ef42a4bd421c0e75a30deae9dca552c605912aad3474` |
 | `SuperAutoStudy-client-1.0.18.zip` | 53.6 KB | `3a1dae8d93fc19f8a9cca0df0a5da717b7ce9cb62744bb7bbe644ea7ada492ed` |
 
 便携包与安装包内容一致（339 MB 解压后，1512 个文件），
