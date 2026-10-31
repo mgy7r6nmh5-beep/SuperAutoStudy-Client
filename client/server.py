@@ -829,7 +829,11 @@ class Services:
             return "err", "后端 jar 缺失（app/target）"
         if not os.path.exists(self.java):
             return "err", "找不到随包 JDK：{}".format(self.java)
-        args = [self.java, "-Dfile.encoding=UTF-8", "-jar", jar,
+        # sun.net.inetaddr.ttl：JVM 默认把 DNS 结果缓存到进程结束。本机走了
+        # fake-ip 代理（api.siliconflow.cn 会解析成 198.18.x.x），代理一重启映射就变，
+        # 缓存不刷新会一直连旧地址，表现为偶发 ConnectException。60 秒过期够用。
+        args = [self.java, "-Dfile.encoding=UTF-8", "-Dsun.net.inetaddr.ttl=60",
+                "-Dsun.net.inetaddr.negative.ttl=10", "-jar", jar,
                 "--server.port={}".format(HTTP_PORT)]
 
         try:
@@ -1603,6 +1607,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._json({"ok": False, "error": str(exc)})
 
+        # 章节测验：最近交过的几份 + 得分。
+        if p == "/api/quiz/recent":
+            acc = SVC.fetch_account()
+            if not acc:
+                return self._json({"ok": False, "error": "本地没有账号"})
+            limit = (q.get("limit") or ["10"])[0]
+            url = "http://127.0.0.1:{}/api/quiz/recent?account={}&limit={}".format(
+                HTTP_PORT, quote(acc[0]), quote(limit))
+            try:
+                return self._json(http_json(url, timeout=60))
+            except Exception as exc:
+                return self._json({"ok": False, "error": str(exc)})
+
         # 章节测验：待确认列表。后端整份返回（题目 + AI 建议），这里只做转发。
         if p == "/api/quiz":
             acc = SVC.fetch_account()
@@ -1832,14 +1849,18 @@ class Handler(BaseHTTPRequestHandler):
             print("[操作] 保存设置 -> {}".format(saved))
             return self._json({"ok": True, "settings": saved})
 
-        # 提交 / 跳过一份测验。一次提交就定分，所以这里不做任何自动重试。
-        m = re.match(r"^/api/quiz/(\d+)/(submit|skip)$", p)
+        # 提交 / 跳过 / 重试作答 / 查成绩。提交一次就定分，所以提交这条路不做自动重试。
+        m = re.match(r"^/api/quiz/(\d+)/(submit|skip|retry|score)$", p)
         if m:
             qid, action = m.group(1), m.group(2)
             url = "http://127.0.0.1:{}/api/quiz/{}/{}".format(HTTP_PORT, qid, action)
-            print("[操作] {} 测验 #{}".format("提交" if action == "submit" else "跳过", qid))
+            label = {"submit": "提交", "skip": "跳过",
+                     "retry": "重试作答", "score": "查成绩"}[action]
+            print("[操作] {} 测验 #{}".format(label, qid))
             try:
-                return self._json(http_json(url, body if body else {}, timeout=180))
+                # 重试要等模型把整份卷子重新答一遍，给足时间
+                return self._json(http_json(url, body if body else {},
+                                            timeout=300 if action == "retry" else 180))
             except Exception as exc:
                 return self._json({"ok": False, "error": str(exc)})
 

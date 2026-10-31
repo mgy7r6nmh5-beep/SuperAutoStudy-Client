@@ -73,6 +73,15 @@ public class QuizPaper {
 
     private List<QuizQuestion> questions;
 
+    /**
+     * 提交后从批阅页读到的「本次成绩」。null = 还没查过 / 查不到。
+     * 存在 paper_json 里，不占新字段，老库不用改表。
+     */
+    private Double score;
+
+    /** 批阅页上的「满分」。 */
+    private Double fullScore;
+
     /** 抓到几道题。0 通常意味着选择器过期或者被返回了提示页。 */
     public int size() {
         return questions == null ? 0 : questions.size();

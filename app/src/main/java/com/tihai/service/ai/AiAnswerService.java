@@ -34,8 +34,9 @@ import java.util.regex.Pattern;
  * <ol>
  *   <li><b>只返回选项字母，不返回选项文本。</b> 让模型复述原文，它经常顺手
  *       改个同义词或者删个标点，本地就匹配不上了。字母最稳。</li>
- *   <li><b>一次请求打包全部题目。</b> 分题请求既慢又贵，而且同一份卷子里
- *       前后题的语境是相关的。</li>
+ *   <li><b>一题一问，不打包。</b> 打包看着省请求，但小模型漏题、串题、把两道题的
+ *       答案揉成一条是常事，一次出错整批作废。单题请求 prompt 短、输出短、
+ *       不会截断，稳得多。</li>
  *   <li><b>答不出来就认怂。</b> 校验不过的题标 {@code manual} 让人工填，
  *       绝不随机凑一个 —— 随机交卷比空着更糟，因为提交即定分。</li>
  * </ol>
@@ -119,48 +120,32 @@ public class AiAnswerService {
             return questions;
         }
 
-        List<QuizQuestion> pending = new ArrayList<>(questions);
-        // 第一轮
-        ask(cfg, pending, courseName);
-        // 校验不过的重试一次：模型对单题往往比批量更专注
-        List<QuizQuestion> retry = new ArrayList<>();
+        // 一题一问。批量问看着省请求，实际上小模型经常漏题、串题、把答案搅在一起
+        // （3 道题只回 1 条、两条答案合并成一条都见过），解析出来还得整批重来。
+        // 单题请求 prompt 短、输出短、不会截断，反而更稳；云端按 token 算钱，
+        // 拆开并不贵，就是多几个 HTTP 往返。
         for (QuizQuestion q : questions) {
-            if (q.isManual()) {
-                retry.add(q);
+            List<QuizQuestion> one = new ArrayList<>(Collections.singletonList(q));
+            ask(cfg, one, courseName);
+            if (!q.isManual()) {
+                continue;
             }
-        }
-        if (!retry.isEmpty()) {
-            // 先看第一轮是怎么失败的，再决定要不要重试 —— 顺序不能反：
-            // 下面清 note 的那一步会把失败原因抹掉，清完再判断就永远是「没问题」。
+            // 先看是怎么失败的再决定要不要重试 —— 顺序不能反：下面清 note 那一步
+            // 会把失败原因抹掉，清完再判断就永远是「没问题」。
             //
-            // 如果是 key 错、地址不通这类「请求本身发不出去」的失败，一题一问只会
-            // 把同一个错误重复 N 遍，每次都等满超时。抓题跑在刷课线程上，
-            // 一份 20 题的卷子能卡二十分钟，整门课的进度全停 —— 这种一律不重试。
-            boolean transportBroken = false;
-            for (QuizQuestion q : questions) {
-                String n = q.getNote() == null ? "" : q.getNote();
-                if (n.startsWith("AI 调用失败") || n.startsWith("AI 未配置")
-                        || n.startsWith("构造请求失败")) {
-                    transportBroken = true;
-                    break;
-                }
-            }
-            for (QuizQuestion q : retry) {
-                q.setManual(false);
-                q.setNote("");
-            }
-            if (transportBroken) {
+            // key 错、地址不通这类「请求本身发不出去」的失败，一题一问只会把同一个
+            // 错误重复 N 遍，每次都等满超时。抓题跑在刷课线程上，一份 20 题的卷子
+            // 能卡二十分钟，整门课的进度全停 —— 这种直接收手。
+            String note = q.getNote() == null ? "" : q.getNote();
+            if (note.startsWith("AI 调用失败") || note.startsWith("AI 未配置")
+                    || note.startsWith("构造请求失败")) {
                 markAll(questions, "AI 不可用，先去看设置里的接口地址 / key / 模型");
-            } else if (retry.size() == questions.size() && questions.size() > 1) {
-                // 整批全挂通常意味着回复被截断、JSON 崩了（便宜的小模型很常见），
-                // 这时候原样再批量问一遍大概率还是崩。改成一题一问：prompt 短、输出也短，
-                // 截断的风险基本没了，代价只是多几个请求 —— 小模型按 token 算，很便宜。
-                for (QuizQuestion q : retry) {
-                    ask(cfg, new ArrayList<>(Collections.singletonList(q)), courseName);
-                }
-            } else {
-                ask(cfg, retry, courseName);
+                break;
             }
+            // 只是这一题没答好（漏答、格式不对），单独再问一遍
+            q.setManual(false);
+            q.setNote("");
+            ask(cfg, one, courseName);
         }
         // 还是不行就保持 manual
         for (QuizQuestion q : questions) {
@@ -183,12 +168,29 @@ public class AiAnswerService {
             return;
         }
 
-        String content;
-        try {
-            content = post(cfg, payload);
-        } catch (Exception e) {
-            log.warn("AI 调用失败: {}", e.toString());
-            markAll(batch, "AI 调用失败: " + brief(e.getMessage()));
+        String content = null;
+        // 网络抖一下就整份作废太亏了。域名走本地代理（fake-ip）时偶发
+        // ConnectException，隔两秒重试一次基本就过去了；仍然是失败才认。
+        Exception last = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                content = post(cfg, payload);
+                break;
+            } catch (Exception e) {
+                last = e;
+                log.warn("AI 调用失败（第 {} 次）: {}", attempt, e.toString());
+                if (attempt < 3) {
+                    try {
+                        Thread.sleep(2000L * attempt);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        }
+        if (content == null) {
+            markAll(batch, "AI 调用失败: " + brief(last == null ? "未知" : last.getMessage()));
             return;
         }
 

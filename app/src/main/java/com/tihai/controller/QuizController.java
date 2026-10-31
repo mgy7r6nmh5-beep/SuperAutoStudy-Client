@@ -81,4 +81,34 @@ public class QuizController {
         quizService.skip(id, reason);
         return R.ok().setData("已跳过");
     }
+
+    /**
+     * 让 AI 重新作答。
+     *
+     * <p>抓题那一刻网络断了、或者模型抽风只答了一半，就点这个重来一次，
+     * 不用手填。
+     */
+    @PostMapping("/{id}/retry")
+    public R retry(@PathVariable("id") long id) {
+        Map<String, Object> r = quizService.retry(id);
+        return Boolean.TRUE.equals(r.get("ok"))
+                ? R.ok().setData(r)
+                : R.error(400, String.valueOf(r.get("message"))).setData(r);
+    }
+
+    /** 重新查成绩（交过之后才有的读）。 */
+    @PostMapping("/{id}/score")
+    public R score(@PathVariable("id") long id) {
+        Map<String, Object> r = quizService.refreshScore(id);
+        return Boolean.TRUE.equals(r.get("ok"))
+                ? R.ok().setData(r)
+                : R.error(400, String.valueOf(r.get("message"))).setData(r);
+    }
+
+    /** 最近交过的几份 + 成绩。 */
+    @GetMapping("/recent")
+    public R recent(@RequestParam("account") String account,
+                    @RequestParam(value = "limit", required = false, defaultValue = "10") int limit) {
+        return R.ok().setData(quizService.recent(account, Math.min(limit, 50)));
+    }
 }

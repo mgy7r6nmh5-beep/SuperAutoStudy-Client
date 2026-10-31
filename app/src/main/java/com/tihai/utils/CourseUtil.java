@@ -1381,6 +1381,110 @@ public class CourseUtil {
      *
      * @return 解析好的卷子；{@code size() == 0} 表示没抓到题，调用方别提交
      */
+    /** 拼 URL 用：null 变空串，省得到处判空。 */
+    private static String nz(String s) {
+        return s == null ? "" : s;
+    }
+
+    /**
+     * 从批阅页读「本次成绩」。
+     *
+     * <p>交过之后再请求做题页，超星会 302 到 {@code selectWorkQuestionYiPiYue}，
+     * 那页的正文里有这么一段（去掉标签后）：
+     * <pre>
+     *   题量: 4   满分: 100.0   第1次作答   本次成绩   100   分
+     * </pre>
+     * 所以拿 paper 里存过的 pageUrl 再请求一次就能读到分，不用另拼批阅页地址。
+     *
+     * @return true 表示读到了分（已写进 paper）
+     */
+    public boolean fillScore(QuizPaper paper) {
+        if (paper == null || paper.getPageUrl() == null || paper.getPageUrl().isEmpty()) {
+            return false;
+        }
+        OkHttpClient client = initSession(false, false);
+        // 直接请求做题页会被 passport 踢去登录页，必须先建一次课程上下文
+        if (paper.getCourseId() != null && paper.getClazzId() != null) {
+            String middle = String.format(
+                    "https://mooc1.chaoxing.com/visit/stucoursemiddle?courseid=%s&clazzid=%s&vc=1&cpi=%s",
+                    paper.getCourseId(), paper.getClazzId(),
+                    paper.getCpi() == null ? "" : paper.getCpi());
+            try (Response ignored = client.newCall(new Request.Builder().url(middle).build()).execute()) {
+                // 只为 Set-Cookie
+            } catch (Exception e) {
+                // 建不上也继续试，说不定 cookie 还热着
+            }
+        }
+        // 交过之后做题页只回一句「无效的作答记录」，得直接开批阅页。
+        // 批阅页要的参数做题页的 form 里全有（含 workAnswerId），照拼就行。
+        Map<String, String> f = paper.getForm() == null
+                ? new java.util.LinkedHashMap<String, String>() : paper.getForm();
+        String gradeUrl = String.format(
+                "https://mooc1.chaoxing.com/mooc-ans/work/selectWorkQuestionYiPiYue"
+                        + "?courseId=%s&workAnswerId=%s&workId=%s&api=1&knowledgeid=%s"
+                        + "&classId=%s&oldWorkId=%s&jobid=%s&type=&isphone=false&submit=false"
+                        + "&enc=%s&cpi=%s&mooc2=1&skipHeader=true&originJobId=%s"
+                        + "&fromType=&wMicroNodeId=0",
+                nz(f.get("courseId")), nz(f.get("workAnswerId")), nz(paper.getWorkId()),
+                nz(f.get("knowledgeid")), nz(f.get("classId")), nz(f.get("oldWorkId")),
+                nz(f.get("jobid")), nz(f.get("enc")), nz(f.get("cpi")), nz(f.get("jobid")));
+
+        String[] urls = {
+                gradeUrl,
+                paper.getPageUrl().replace("/doHomeWorkNew", "/selectWorkQuestionYiPiYue")
+        };
+        String lastBody = null;
+        for (String u : urls) {
+            String body;
+            try (Response resp = client.newCall(new Request.Builder().url(u).build()).execute()) {
+                if (!resp.isSuccessful() || resp.body() == null) {
+                    continue;
+                }
+                body = resp.body().string();
+            } catch (Exception e) {
+                continue;
+            }
+            lastBody = body;
+            if (!body.contains("本次成绩")) {
+                continue;
+            }
+            // 标签中间夹着换行和空白，先压成一行再匹配
+            String text = body.replaceAll("<[^>]+>", " ").replaceAll("\\s+", " ");
+            Matcher m = Pattern.compile("本次成绩\\s*(\\d+(?:\\.\\d+)?)\\s*分").matcher(text);
+            if (!m.find()) {
+                continue;
+            }
+            paper.setScore(Double.valueOf(m.group(1)));
+            Matcher fm = Pattern.compile("满分\\s*[:：]?\\s*(\\d+(?:\\.\\d+)?)").matcher(text);
+            if (fm.find()) {
+                paper.setFullScore(Double.valueOf(fm.group(1)));
+            } else if (f.get("fullScore") != null) {
+                // 批阅页没写满分就用做题页 form 里那个
+                try {
+                    paper.setFullScore(Double.valueOf(f.get("fullScore").trim()));
+                } catch (NumberFormatException ignored) {
+                    // 不是数字就算了
+                }
+            }
+            return true;
+        }
+        // 读不到就把最后拿到的页面存下来，方便排查（选择器/页面结构变了）
+        if (lastBody != null) {
+            try {
+                java.io.File dir = new java.io.File("quiz-dump");
+                if (!dir.exists()) {
+                    dir.mkdirs();
+                }
+                java.nio.file.Files.write(
+                        new java.io.File(dir, "score-" + paper.getWorkId() + ".html").toPath(),
+                        lastBody.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } catch (Exception ignored) {
+                // 调试文件写不出来不影响主流程
+            }
+        }
+        return false;
+    }
+
     public QuizPaper fetchQuizPaper(Course course, Job job, JobInfo jobInfo) throws IOException {
         OkHttpClient client = initSession(false, false);
 
@@ -1606,7 +1710,29 @@ public class CourseUtil {
             // 服务端成功时返回 {"status":true,"msg":"success"}，但也见过
             // status 是字符串 "true" 的，两种都认
             String t = body.replaceAll("\\s+", "");
-            return t.contains("\"status\":true") || t.contains("\"status\":\"true\"");
+            boolean ok = t.contains("\"status\":true") || t.contains("\"status\":\"true\"");
+            if (ok) {
+                // 交完把落点记下来：跟着返回的 url 走一跳，最终会停在批阅页，
+                // 那个地址才读得到「本次成绩」。原来的做题页交过之后只会回
+                // 「无效的作答记录」。
+                String back = "";
+                Matcher um = Pattern.compile("\"url\":\"([^\"]+)\"").matcher(body);
+                if (um.find()) {
+                    back = um.group(1).replace("\\/", "/");
+                }
+                if (!back.isEmpty()) {
+                    try {
+                        String full = java.net.URI.create(paper.getPageUrl()).resolve(back).toString();
+                        try (Response r2 = client.newCall(
+                                new Request.Builder().url(full).build()).execute()) {
+                            paper.setPageUrl(r2.request().url().toString());
+                        }
+                    } catch (Exception ignored) {
+                        // 记不上地址顶多查不到分，不影响已经交上去的卷子
+                    }
+                }
+            }
+            return ok;
         }
     }
 }

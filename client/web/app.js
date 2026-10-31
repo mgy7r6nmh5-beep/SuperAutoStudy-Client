@@ -64,7 +64,8 @@ const S = {
   points: {},          // courseId -> {loading, data, error, at}
   // 待确认测验：items 为后端原始行，answers 缓存用户在界面上的改动
   // （pid -> {qid: answer}），不直接写回 items，免得重绘把用户输入冲掉。
-  quiz: { items: null, loading: false, error: '', answers: {}, ai: null, submitting: {} },
+  quiz: { items: null, loading: false, error: '', answers: {}, ai: null, submitting: {},
+          recent: null, recentLoading: false },
   busy: false,
 };
 
@@ -494,6 +495,7 @@ function viewSettings(d) {
 const QZ_TYPE_NAME = { single: '单选', multiple: '多选', judge: '判断', fill: '填空', short: '简答' };
 
 async function ensureQuizLoaded() {
+  loadQuizRecent();
   if (S.quiz.loading || S.quiz.items !== null) return;
   loadQuiz();
 }
@@ -623,7 +625,52 @@ function viewQuiz(d) {
       </div>
     </div>
     ${items.map(p => viewQuizPaper(p)).join('')}
+    ${viewQuizRecent()}
   </div>`;
+}
+
+/** 最近交过的几份，带得分。分数是提交时从批阅页读回来的，读不到就显示「—」。 */
+function viewQuizRecent() {
+  const list = S.quiz.recent;
+  if (!list || !list.length) return '';
+  const rows = list.map(it => {
+    const has = it.score != null;
+    const s = has ? `${it.score}${it.fullScore ? ' / ' + it.fullScore : ''}` : '—';
+    const color = has ? (it.fullScore && it.score >= it.fullScore * 0.6 ? 'var(--ok)' : 'var(--err)') : 'var(--fg-2)';
+    return `<div class="row" style="justify-content:space-between;gap:var(--s3);padding:var(--s2) 0;border-top:1px solid var(--line)">
+      <div style="min-width:0;flex:1">
+        <div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.title || '—')}</div>
+        <div class="faint" style="font-size:var(--t-xs)">
+          ${esc(it.course_name || '—')} · ${esc((it.update_time || '').replace('T', ' ').slice(0, 16))}
+        </div>
+      </div>
+      <span class="mono" style="color:${color};font-weight:600;white-space:nowrap">${s}</span>
+      <button class="btn btn-ghost btn-sm" data-act="quiz-score" data-id="${it.id}">查得分</button>
+    </div>`;
+  }).join('');
+  return `<div class="panel" style="margin-top:var(--s4)">
+    <div class="panel-head">
+      <span class="panel-title">最近提交 · 得分</span>
+      <button class="btn btn-ghost btn-sm" data-act="quiz-score-all">刷新成绩</button>
+    </div>
+    ${rows}
+  </div>`;
+}
+
+/** 挨个重新查一遍成绩，超星那边刚批完的也能刷出来。 */
+async function doQuizScoreAll() {
+  const list = S.quiz.recent || [];
+  if (!list.length) return;
+  toast(`正在查 ${list.length} 份的成绩…`, 'ok');
+  for (const it of list) {
+    try {
+      await api(`/api/quiz/${it.id}/score`, { method: 'POST' });
+    } catch (e) { /* 单份失败不影响其他 */ }
+  }
+  await loadQuizRecent(true);
+  render();
+  const got = (S.quiz.recent || []).filter(x => x.score != null).length;
+  toast(`查完了，${got} 份有分数`, 'ok');
 }
 
 function viewQuizPaper(p) {
@@ -648,9 +695,13 @@ function viewQuizPaper(p) {
          <button class="btn btn-primary" data-act="quiz-submit" data-id="${p.id}">
            提交这份（${qs.length} 题）
          </button>
+         <button class="btn" data-act="quiz-retry" data-id="${p.id}">
+           重新让 AI 作答
+         </button>
          <button class="btn btn-danger" data-act="quiz-skip" data-id="${p.id}">跳过</button>
        </div>`
     : `<div class="qz-actions" style="margin-top:var(--s4)">
+         <button class="btn" data-act="quiz-retry" data-id="${p.id}">重新让 AI 作答</button>
          <button class="btn" data-act="quiz-skip" data-id="${p.id}">跳过这条</button>
        </div>`;
 
@@ -746,14 +797,68 @@ async function doQuizSubmit(pid) {
   const r = await api(`/api/quiz/${pid}/submit`, { method: 'POST', body: { answers } });
   const ok = !!(r && ((r.data && r.data.ok) || r.ok === true || r.code === 200));
   const why = (r && ((r.data && r.data.message) || r.msg || r.error)) || '未知错误';
-  toast(ok ? '已提交' : '提交失败：' + why, ok ? 'ok' : 'err');
+  // 交完顺手把分带出来，省得再去点一次「查得分」
+  const got = r && r.data ? r.data : {};
+  const scoreTxt = ok && got.score != null
+    ? ` · 得分 ${got.score}${got.fullScore ? ' / ' + got.fullScore : ''}`
+    : '';
+  toast(ok ? '已提交' + scoreTxt : '提交失败：' + why, ok ? 'ok' : 'err');
   if (ok) {
     S.quiz.items = (S.quiz.items || []).filter(x => String(x.id) !== String(pid));
     delete S.quiz.answers[pid];
+    loadQuizRecent(true);
     render();
     poll();
   } else {
     paintQuizBusy(pid, false);
+  }
+}
+
+async function doQuizRetry(pid) {
+  const btn = document.querySelector(`[data-act="quiz-retry"][data-id="${pid}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = '正在重新作答…'; }
+  toast('正在让 AI 重做这份，十几秒…', 'ok');
+  const r = await api(`/api/quiz/${pid}/retry`, { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = '重新让 AI 作答'; }
+  const ok = !!(r && (r.ok === true || (r.data && r.data.ok)));
+  const msg = (r && ((r.data && r.data.message) || r.msg || r.error)) || '未知错误';
+  toast(ok ? msg : '重试失败：' + msg, ok ? 'ok' : 'err');
+  if (ok) {
+    delete S.quiz.answers[pid];
+    S.quiz.items = null;
+    await loadQuiz();
+    render();
+  }
+}
+
+/* 最近交过的几份 + 成绩 */
+async function loadQuizRecent(force) {
+  if (S.quiz.recentLoading) return;
+  if (S.quiz.recent && !force) return;
+  S.quiz.recentLoading = true;
+  try {
+    const r = await api('/api/quiz/recent?limit=10');
+    if (r && (r.code === 200 || r.ok === true)) S.quiz.recent = r.data || [];
+  } catch (e) {
+    S.quiz.recent = [];
+  } finally {
+    S.quiz.recentLoading = false;
+  }
+}
+
+async function doQuizScore(pid) {
+  const btn = document.querySelector(`[data-act="quiz-score"][data-id="${pid}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = '查…'; }
+  const r = await api(`/api/quiz/${pid}/score`, { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = '查得分'; }
+  const ok = !!(r && (r.ok === true || (r.data && r.data.ok)));
+  const d = (r && r.data) || {};
+  if (ok && d.score != null) {
+    toast(`得分 ${d.score}${d.fullScore ? ' / ' + d.fullScore : ''}`, 'ok');
+    await loadQuizRecent(true);
+    render();
+  } else {
+    toast('没读到分：' + ((d && d.message) || (r && r.error) || '未知错误'), 'err');
   }
 }
 
@@ -1394,6 +1499,9 @@ document.addEventListener('click', async (e) => {
   if (act === 'quiz-reload') { S.quiz.items = null; return loadQuiz(); }
   if (act === 'quiz-submit') return doQuizSubmit(el.dataset.id);
   if (act === 'quiz-skip') return doQuizSkip(el.dataset.id);
+  if (act === 'quiz-retry') return doQuizRetry(el.dataset.id);
+  if (act === 'quiz-score') return doQuizScore(el.dataset.id);
+  if (act === 'quiz-score-all') return doQuizScoreAll();
 
   // ---- AI 配置
   if (act === 'save-ai') return doSaveAiConfig();

@@ -349,16 +349,167 @@ public class QuizService {
 
         try {
             boolean ok = courseUtil.submitQuiz(paper, answers);
-            updateStatus(id, ok ? STATUS_SUBMITTED : STATUS_FAILED,
+            // 交成功就顺手把「本次成绩」读回来，界面上直接能看到分
+            if (ok) {
+                courseUtil.fillScore(paper);
+            }
+            updatePaper(id, paper, ok ? STATUS_SUBMITTED : STATUS_FAILED,
                     ok ? null : "服务端拒绝提交");
             result.put("ok", ok);
+            result.put("score", paper.getScore());
+            result.put("fullScore", paper.getFullScore());
             result.put("message", ok ? "已提交" : "服务端拒绝提交，详情看 app/boot.log");
         } catch (Exception e) {
-            updateStatus(id, STATUS_FAILED, "提交异常: " + e.getMessage());
+            updatePaper(id, paper, STATUS_FAILED, "提交异常: " + e.getMessage());
             result.put("ok", false);
             result.put("message", "提交异常: " + e.getMessage());
         }
         return result;
+    }
+
+    /**
+     * 让 AI 重新作答一份待确认的卷子。
+     *
+     * <p>典型场景：抓题那一刻网络断了 / 模型抽风，整份没答案，只留一句
+     * 「N 题 AI 没把握」。这时候不该让用户手填，重跑一遍就行。
+     *
+     * @return {@code {ok, answered, total, message}}
+     */
+    public Map<String, Object> retry(long id) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT paper_json, status, course_name FROM th_wk_quiz WHERE id = ?", id);
+        if (rows.isEmpty()) {
+            result.put("ok", false);
+            result.put("message", "记录不存在");
+            return result;
+        }
+        int status = ((Number) rows.get(0).get("status")).intValue();
+        if (status == STATUS_SUBMITTED) {
+            result.put("ok", false);
+            result.put("message", "这份已经交过了，重试会改不了分");
+            return result;
+        }
+        QuizPaper paper;
+        try {
+            paper = MAPPER.readValue(String.valueOf(rows.get(0).get("paper_json")), QuizPaper.class);
+        } catch (Exception e) {
+            result.put("ok", false);
+            result.put("message", "记录内容损坏: " + e.getMessage());
+            return result;
+        }
+        if (paper.isAlreadySubmitted()) {
+            result.put("ok", false);
+            result.put("message", "抓到的是批阅页，说明早就交过了");
+            return result;
+        }
+        // 清掉上一轮的答案再问，免得旧答案被当成 AI 结果留下来
+        for (QuizQuestion q : paper.getQuestions()) {
+            q.setSuggestion(null);
+            q.setConfidence(null);
+            q.setReason(null);
+            q.setManual(false);
+            q.setNote(null);
+        }
+        String courseName = rows.get(0).get("course_name") == null
+                ? null : String.valueOf(rows.get(0).get("course_name"));
+        try {
+            aiAnswerService.fill(paper.getQuestions(), courseName);
+        } catch (Exception e) {
+            log.warn("重试作答失败 #{}: {}", id, e.toString());
+        }
+        int answered = 0;
+        for (QuizQuestion q : paper.getQuestions()) {
+            String a = q.getSuggestion() == null ? q.getAnswer() : q.getSuggestion();
+            if (a != null && !a.trim().isEmpty()) {
+                answered++;
+            }
+        }
+        String msg = answered == paper.size()
+                ? "AI 已重新作答（" + answered + " 题）"
+                : answered + " 题有答案，" + (paper.size() - answered) + " 题仍需人工";
+        updatePaper(id, paper, STATUS_PENDING, msg);
+        result.put("ok", true);
+        result.put("answered", answered);
+        result.put("total", paper.size());
+        result.put("message", msg);
+        return result;
+    }
+
+    /** 重新查一次成绩（已经交过的那些）。 */
+    public Map<String, Object> refreshScore(long id) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT paper_json FROM th_wk_quiz WHERE id = ?", id);
+        if (rows.isEmpty()) {
+            result.put("ok", false);
+            result.put("message", "记录不存在");
+            return result;
+        }
+        QuizPaper paper;
+        try {
+            paper = MAPPER.readValue(String.valueOf(rows.get(0).get("paper_json")), QuizPaper.class);
+        } catch (Exception e) {
+            result.put("ok", false);
+            result.put("message", "记录内容损坏");
+            return result;
+        }
+        boolean ok = courseUtil.fillScore(paper);
+        if (ok) {
+            try {
+                jdbc.update("UPDATE th_wk_quiz SET paper_json = ?, update_time = ? WHERE id = ?",
+                        MAPPER.writeValueAsString(paper), LocalDateTime.now(), id);
+            } catch (Exception e) {
+                log.warn("成绩写回失败 #{}: {}", id, e.toString());
+            }
+        }
+        result.put("ok", ok);
+        result.put("score", paper.getScore());
+        result.put("fullScore", paper.getFullScore());
+        result.put("message", ok ? "已更新成绩" : "还没出分，或者批阅页读不到");
+        return result;
+    }
+
+    /** 最近交过的几份（带成绩），给界面做个「看得分」列表。 */
+    public List<Map<String, Object>> recent(String account, int limit) {
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT id, course_name, title, status, error_message, update_time, paper_json"
+                        + " FROM th_wk_quiz WHERE account = ? AND status = ?"
+                        + " ORDER BY id DESC LIMIT ?",
+                account, STATUS_SUBMITTED, limit);
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", row.get("id"));
+            m.put("course_name", row.get("course_name"));
+            m.put("title", row.get("title"));
+            m.put("update_time", row.get("update_time"));
+            Object json = row.get("paper_json");
+            if (json != null) {
+                try {
+                    QuizPaper p = MAPPER.readValue(json.toString(), QuizPaper.class);
+                    m.put("score", p.getScore());
+                    m.put("fullScore", p.getFullScore());
+                    m.put("questionCount", p.size());
+                } catch (Exception ignored) {
+                    // 坏记录就当没分
+                }
+            }
+            out.add(m);
+        }
+        return out;
+    }
+
+    /** 改状态 + 把 paper 的改动（答案、成绩）一起写回去。 */
+    private void updatePaper(long id, QuizPaper paper, int status, String message) {
+        try {
+            jdbc.update("UPDATE th_wk_quiz SET status = ?, error_message = ?, paper_json = ?,"
+                            + " update_time = ? WHERE id = ?",
+                    status, message, MAPPER.writeValueAsString(paper), LocalDateTime.now(), id);
+        } catch (Exception e) {
+            log.warn("写回测验记录失败 #{}: {}", id, e.toString());
+            updateStatus(id, status, message);
+        }
     }
 
     public void skip(long id, String reason) {
