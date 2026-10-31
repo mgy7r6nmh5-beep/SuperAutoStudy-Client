@@ -48,8 +48,8 @@
 >
 > | 文件 | 大小 | 说明 |
 > |---|---|---|
-> | `SuperAutoStudy-Setup-<版本>.exe` | 142.5 MB | **推荐**，图形化安装向导 |
-> | `SuperAutoStudy-portable-<版本>.zip` | 282.0 MB | 免安装，解压即用 |
+> | `SuperAutoStudy-Setup-<版本>.exe` | 109.6 MB | **推荐**，图形化安装向导 |
+> | `SuperAutoStudy-portable-<版本>.zip` | 191.9 MB | 免安装，解压即用 |
 >
 > 之后升级不必重下：客户端内置 **OTA**，见 [在线更新（OTA）](#在线更新ota)。
 >

@@ -37,7 +37,45 @@ def fatal(title, message):
         ctypes.windll.user32.MessageBoxW(None, str(message), str(title), 0x10)
     except Exception:
         pass
-    sys.stderr.write("{}: {}\n".format(title, message))
+    try:
+        if sys.stderr is not None:
+            sys.stderr.write("{}: {}\n".format(title, message))
+    except Exception:
+        pass
+
+
+def fallback_to_browser(port, reason):
+    """窗口后端起不来时的退路：改用系统浏览器，本地服务继续跑。
+
+    触发条件就是那句「窗口启动失败：failed to load ...Python.Runtime.dll」——
+    pywebview 要靠 pythonnet 加载 .NET，机器上 .NET 版本不够、或者安装路径
+    带中文导致路径传给 .NET 时乱码，都会走到这里。
+    这时候数据库和后端其实已经正常启动了，没必要让用户白等一场。
+    """
+    import webbrowser
+
+    url = "http://127.0.0.1:{}".format(port)
+    opened = False
+    try:
+        opened = bool(webbrowser.open(url))
+    except Exception:
+        opened = False
+
+    msg = ("{}\n\n"
+           "本地服务已经启动，界面可以直接用浏览器打开：\n"
+           "    {}\n").format(reason, url)
+    if not opened:
+        msg += "\n浏览器没能自动打开，请手动把上面的地址复制到浏览器。\n"
+    msg += ("\n点「确定」后程序会继续在后台运行。\n"
+            "要彻底退出，请在任务管理器里结束 pythonw.exe。")
+    fatal("SuperAutoStudy 窗口打不开（已改用浏览器）", msg)
+
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+
 
 
 def wait_port(port, timeout=12.0):
@@ -111,11 +149,8 @@ def main():
     try:
         import webview
     except Exception as exc:
-        fatal("SuperAutoStudy 启动失败",
-              "缺少 WebView2 运行环境，无法打开窗口：\n{}\n\n"
-              "请安装 Microsoft Edge WebView2 Runtime（Win10/11 通常自带）。\n"
-              "也可以直接用浏览器打开 http://127.0.0.1:{}".format(exc, port))
-        return 1
+        fallback_to_browser(port, "缺少 WebView2 运行环境，无法打开窗口：\n{}".format(exc))
+        return 0
 
     webview.create_window(
         "SuperAutoStudy",
@@ -128,8 +163,8 @@ def main():
     try:
         webview.start()
     except Exception as exc:
-        fatal("SuperAutoStudy 运行异常", "窗口启动失败：\n{}".format(exc))
-        return 1
+        fallback_to_browser(port, "窗口启动失败：\n{}".format(exc))
+        return 0
     finally:
         if httpd is not None:
             httpd.shutdown()
