@@ -641,21 +641,27 @@ function viewQuizRecent() {
     const has = it.score != null;
     const s = has ? `${it.score}${it.fullScore ? ' / ' + it.fullScore : ''}` : '—';
     const color = has ? (it.fullScore && it.score >= it.fullScore * 0.6 ? 'var(--ok)' : 'var(--err)') : 'var(--fg-2)';
+    // 交卷时间（update_time 就是提交那一刻，刷新成绩不会改它）
+    const at = (it.update_time || '').replace('T', ' ').slice(0, 19);
     return `<div class="row" style="justify-content:space-between;gap:var(--s3);padding:var(--s2) 0;border-top:1px solid var(--line)">
       <div style="min-width:0;flex:1">
         <div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.title || '—')}</div>
         <div class="faint" style="font-size:var(--t-xs)">
-          ${esc(it.course_name || '—')} · ${esc((it.update_time || '').replace('T', ' ').slice(0, 16))}
+          ${esc(it.course_name || '—')}
         </div>
       </div>
-      <span class="mono" style="color:${color};font-weight:600;white-space:nowrap">${s}</span>
+      <span class="mono faint" style="font-size:var(--t-xs);white-space:nowrap">${esc(at || '—')}</span>
+      <span class="mono" style="color:${color};font-weight:600;white-space:nowrap;min-width:82px;text-align:right">${s}</span>
       <button class="btn btn-ghost btn-sm" data-act="quiz-score" data-id="${it.id}">查得分</button>
     </div>`;
   }).join('');
   return `<div class="panel" style="margin-top:var(--s4)">
     <div class="panel-head">
       <span class="panel-title">最近提交 · 得分</span>
-      <button class="btn btn-ghost btn-sm" data-act="quiz-score-all">刷新成绩</button>
+      <span class="row" style="gap:var(--s2)">
+        <span class="faint" style="font-size:var(--t-xs)">按交卷时间倒序</span>
+        <button class="btn btn-ghost btn-sm" data-act="quiz-score-all">刷新成绩</button>
+      </span>
     </div>
     ${rows}
   </div>`;

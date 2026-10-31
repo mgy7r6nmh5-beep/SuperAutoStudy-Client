@@ -1455,6 +1455,8 @@ public class CourseUtil {
                 continue;
             }
             paper.setScore(Double.valueOf(m.group(1)));
+            paper.setScoreAt(java.time.LocalDateTime.now()
+                    .withNano(0).toString().replace('T', ' '));
             Matcher fm = Pattern.compile("满分\\s*[:：]?\\s*(\\d+(?:\\.\\d+)?)").matcher(text);
             if (fm.find()) {
                 paper.setFullScore(Double.valueOf(fm.group(1)));

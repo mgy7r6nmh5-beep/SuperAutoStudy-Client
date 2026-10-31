@@ -82,6 +82,9 @@ public class QuizPaper {
     /** 批阅页上的「满分」。 */
     private Double fullScore;
 
+    /** 这个分数是什么时候读到的（ISO 字符串，界面上显示用）。 */
+    private String scoreAt;
+
     /** 抓到几道题。0 通常意味着选择器过期或者被返回了提示页。 */
     public int size() {
         return questions == null ? 0 : questions.size();

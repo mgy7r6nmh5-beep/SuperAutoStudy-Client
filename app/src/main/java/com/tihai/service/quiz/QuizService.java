@@ -457,8 +457,10 @@ public class QuizService {
         boolean ok = courseUtil.fillScore(paper);
         if (ok) {
             try {
-                jdbc.update("UPDATE th_wk_quiz SET paper_json = ?, update_time = ? WHERE id = ?",
-                        MAPPER.writeValueAsString(paper), LocalDateTime.now(), id);
+                // 只写 paper_json，**不碰 update_time** —— 那一列是「交卷时间」，
+                // 刷新成绩时改它，界面上所有卷子都会变成刚刚才交的。
+                jdbc.update("UPDATE th_wk_quiz SET paper_json = ? WHERE id = ?",
+                        MAPPER.writeValueAsString(paper), id);
             } catch (Exception e) {
                 log.warn("成绩写回失败 #{}: {}", id, e.toString());
             }
@@ -466,16 +468,17 @@ public class QuizService {
         result.put("ok", ok);
         result.put("score", paper.getScore());
         result.put("fullScore", paper.getFullScore());
+        result.put("scoreAt", paper.getScoreAt());
         result.put("message", ok ? "已更新成绩" : "还没出分，或者批阅页读不到");
         return result;
     }
 
-    /** 最近交过的几份（带成绩），给界面做个「看得分」列表。 */
+    /** 最近交过的几份（带成绩），按**提交时间**倒序 —— 不是按 id。 */
     public List<Map<String, Object>> recent(String account, int limit) {
         List<Map<String, Object>> rows = jdbc.queryForList(
                 "SELECT id, course_name, title, status, error_message, update_time, paper_json"
                         + " FROM th_wk_quiz WHERE account = ? AND status = ?"
-                        + " ORDER BY id DESC LIMIT ?",
+                        + " ORDER BY update_time DESC, id DESC LIMIT ?",
                 account, STATUS_SUBMITTED, limit);
         List<Map<String, Object>> out = new ArrayList<>();
         for (Map<String, Object> row : rows) {
@@ -490,6 +493,7 @@ public class QuizService {
                     QuizPaper p = MAPPER.readValue(json.toString(), QuizPaper.class);
                     m.put("score", p.getScore());
                     m.put("fullScore", p.getFullScore());
+                    m.put("scoreAt", p.getScoreAt());
                     m.put("questionCount", p.size());
                 } catch (Exception ignored) {
                     // 坏记录就当没分
