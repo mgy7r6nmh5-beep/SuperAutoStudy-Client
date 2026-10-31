@@ -16,16 +16,40 @@ OUT = os.path.join(ROOT, "dist-portable", "SuperAutoStudy-portable.zip")
 
 STORED_EXT = {".jar", ".zip", ".png", ".jpg", ".jpeg", ".gz", ".7z", ".mp4", ".xz"}
 
+# 绝对不能进发布包的东西。
+# ai-config.json 里是用户自己的大模型 key，quiz-dump 是抓题失败时的原始页面
+# （含账号 cookie 和课程内容）。就算有人手动把它们拷进了暂存树，这里也拦一道。
+SKIP_REL = {
+    "app/ai-config.json",
+    "client/settings.json",
+}
+SKIP_DIRS = {
+    "app/quiz-dump",
+    "__pycache__",
+}
+
 if os.path.exists(OUT):
     os.remove(OUT)
 
 files = []
+skipped = []
 for dirpath, dirnames, filenames in os.walk(SRC):
     for fn in filenames:
         full = os.path.join(dirpath, fn)
         rel = os.path.relpath(full, os.path.dirname(SRC))
-        files.append((full, rel.replace("\\", "/")))
+        rel = rel.replace("\\", "/")
+        key = rel.split("/", 1)[1] if "/" in rel else rel
+        parts = key.split("/")
+        if (key in SKIP_REL
+                or any(p in SKIP_DIRS for p in parts[:-1])
+                or key.endswith(".pyc")):
+            skipped.append(key)
+            continue
+        files.append((full, rel))
 files.sort(key=lambda x: x[1])
+if skipped:
+    print("已排除 %d 个不该发布的文件: %s" % (len(skipped), ", ".join(sorted(skipped)[:5])),
+          flush=True)
 
 t0 = time.time()
 n_stored = n_defl = 0

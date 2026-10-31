@@ -74,7 +74,7 @@ Source: "SuperAutoStudy\mysql57\data\*"; DestDir: "{app}\mysql57\data"; Flags: i
 ; packager's absolute basedir/datadir, and mysqld launched with it reads a
 ; datadir that only exists on the build machine. client/server.py rewrites
 ; my.ini from the real install root on every start (Services.ensure_my_ini).
-Source: "SuperAutoStudy\*"; Excludes: "mysql57\data\*,client\settings.json,my.ini,diag-report.txt,*__pycache__*,*.pyc,mysql57\console.log*,mysql57\mysql-error.log,app\live.log,app\app.log,app\boot.log"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "SuperAutoStudy\*"; Excludes: "mysql57\data\*,client\settings.json,my.ini,diag-report.txt,*__pycache__*,*.pyc,mysql57\console.log*,mysql57\mysql-error.log,app\live.log,app\app.log,app\boot.log,app\ai-config.json,app\quiz-dump\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\app.ico"
