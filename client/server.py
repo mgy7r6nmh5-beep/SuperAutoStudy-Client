@@ -1041,6 +1041,50 @@ class LiveTracker:
 
 TRACKER = LiveTracker()
 
+# 「最近完成的视频」在重启后就空了 —— tracker 只记得本进程喂过的行。
+# 启动后补一次历史：把日志尾部的「视频已计分 / 未计分 / 被风控」捞出来。
+_BACKFILL = {"done": False}
+_BACKFILL_BYTES = 2 * 1024 * 1024
+
+
+def _scan_done_records(paths):
+    """从历史日志里回放完成记录。
+
+    用**临时** tracker 扫，扫完只取 recent、把 active 丢掉 —— 历史里的
+    「开始学习视频」如果留进主 tracker 的 active，就会变成一张永远跑不完的
+    幽灵卡片（实测 pool-3 elapsed=2581s 一直挂在总览上）。
+
+    两个文件都要扫：v1.0.16 之前 stdout 重定向到 live.log，之后改成 boot.log，
+    所以旧记录在 live.log、新记录在 boot.log，只扫一个会缺一半。
+    """
+    tmp = LiveTracker()
+    for p in paths:
+        try:
+            with open(p, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - _BACKFILL_BYTES))
+                data = f.read()
+        except OSError:
+            continue
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        tmp.feed([ANSI_RE.sub("", ln) for ln in lines])
+    return tmp.recent
+
+
+def _dedup_recent(items, limit=30):
+    """同一个视频可能被刷好几遍，按 (任务名, 结果) 去重，保留最后那条。"""
+    seen = set()
+    out = []
+    for r in reversed(items):
+        key = (r.get("job"), r.get("result"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    out.reverse()
+    return out[-limit:]
+
 
 # ------------------------------------------------------------------ OTA 自更新
 
@@ -1230,6 +1274,14 @@ def build_state():
     fresh = read_log_incremental(log_path)          # tracker：只喂新增的行
     if fresh:
         TRACKER.feed(fresh)
+
+    # 首次调用补一次历史完成记录（只补一次，之后靠增量）
+    if not _BACKFILL["done"]:
+        _BACKFILL["done"] = True
+        hist = _scan_done_records([SVC.livelog, SVC.bootlog])
+        if hist:
+            TRACKER.recent = _dedup_recent(hist + TRACKER.recent)
+
     state["live"] = TRACKER.snapshot()
     state["recentVideos"] = TRACKER.recent[-12:]
 
