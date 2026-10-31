@@ -1018,10 +1018,37 @@ TRACKER = LiveTracker()
 try:
     import updater as _updater_mod
 
+    def _kill_install_processes():
+        """结束所有从当前安装目录启动的 java / python / mysqld（排除自身）。
+
+        老版本重复启动会留下多个后端进程，stop_app() 只按 3030 端口杀一个，
+        其余仍锁着 jar，Inno 的 RestartManager 关不掉就会中止安装。
+        """
+        root = os.path.abspath(ROOT).replace("'", "''")
+        self_pid = os.getpid()
+        script = (
+            "$root = '%s'; $self = %d; "
+            "Get-CimInstance Win32_Process | Where-Object { "
+            "$_.ProcessId -ne $self -and $_.CommandLine -and "
+            "($_.CommandLine -like ('*' + $root + '*')) -and "
+            "($_.Name -eq 'java.exe' -or $_.Name -eq 'python.exe' -or "
+            "$_.Name -eq 'pythonw.exe' -or $_.Name -eq 'mysqld.exe') "
+            "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+            "-ErrorAction SilentlyContinue }"
+        ) % (root, self_pid)
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                           capture_output=True, timeout=25,
+                           creationflags=CREATE_NO_WINDOW)
+        except Exception:
+            pass
+
     def _stop_services_for_update():
         """完整安装 OTA 的前置动作：安装器替换不了被 java/mysqld 锁定的文件。"""
         SVC.stop_app()
         SVC.stop_mysql()
+        _kill_install_processes()
+        time.sleep(1.5)
 
     UPDATER = _updater_mod.Updater(lambda: SETTINGS, ROOT, _stop_services_for_update)
 except Exception:                     # updater 挂了不能影响主程序

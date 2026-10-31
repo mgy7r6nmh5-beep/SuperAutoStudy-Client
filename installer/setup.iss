@@ -14,7 +14,7 @@
 ; ============================================================
 
 #define MyAppName "SuperAutoStudy"
-#define MyAppVersion "1.0.16"
+#define MyAppVersion "1.0.17"
 #define MyAppPublisher "SuperAutoStudy"
 #define MyAppExeName "launch.cmd"
 
@@ -32,7 +32,7 @@ AllowNoIcons=yes
 ; Install per-user, no admin prompt needed.
 PrivilegesRequired=lowest
 OutputDir=.
-OutputBaseFilename=SuperAutoStudy-Setup-1.0.16
+OutputBaseFilename=SuperAutoStudy-Setup-1.0.17
 SetupIconFile=SuperAutoStudy\app.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -43,6 +43,10 @@ UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\app.ico
 MinVersion=10.0
 SetupLogging=yes
+; OTA 前会停掉安装目录内的 java/python/mysqld；不再让 RestartManager
+; 因个别残留进程无法关闭而直接中止静默安装。
+CloseApplications=no
+RestartApplications=no
 
 [Languages]
 Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"

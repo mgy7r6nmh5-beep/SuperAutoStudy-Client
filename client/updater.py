@@ -36,7 +36,7 @@ import zipfile
 
 # 当前客户端版本。每次发布时手动提升，需与 installer/setup.iss 的 MyAppVersion、
 # GitHub Release 的 tag 保持一致（发布流程见 README「发版」一节）。
-CURRENT_VERSION = "1.0.16"
+CURRENT_VERSION = "1.0.17"
 
 DEFAULT_REPO = "mgy7r6nmh5-beep/SuperAutoStudy-Client"
 API_BASE = "https://api.github.com"
@@ -439,6 +439,8 @@ class Updater:
                     self._log("后端 / MySQL 已停止")
                 except Exception as exc:
                     self._log("停止服务失败（继续安装）：%s" % exc)
+            # 给进程退出 / 文件句柄释放留时间，避免安装器仍看到占用
+            time.sleep(1.5)
 
             log = os.path.join(self.root, "_update_setup.log")
             self._set_phase("启动安装器")
