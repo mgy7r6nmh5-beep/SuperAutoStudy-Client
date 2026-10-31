@@ -76,6 +76,19 @@ public class SuperStarLog {
     private String failedChapters;
 
     /**
+     * 本地上次成功上报的视频位置（秒）。断点续刷默认开启，重启后从这里继续。
+     * 允许清空（切换到别的任务点时），所以用 IGNORED 策略。
+     */
+    @TableField(updateStrategy = FieldStrategy.IGNORED)
+    private Long videoPositionSeconds;
+
+    /**
+     * 上面的位置属于哪个任务点（jobId）。任务点变了就只采用平台位置，避免串用。
+     */
+    @TableField(updateStrategy = FieldStrategy.IGNORED)
+    private String videoPositionJobId;
+
+    /**
      * 当前进度
      */
     private BigDecimal currentProgress;

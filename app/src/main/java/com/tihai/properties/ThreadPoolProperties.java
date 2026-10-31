@@ -15,10 +15,12 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 @ConfigurationProperties(prefix = "custom.thread-pool")
 public class ThreadPoolProperties {
-    private int coreSize;
-    private int maxSize;
-    private int keepAlive;
-    private int queueCapacity;
-    private String threadNamePrefix;
-    private boolean allowCoreThreadTimeout;
+    /**
+     * 核心 / 最大线程数不再可配：学习线程固定为 {@link com.tihai.constant.StudyPolicy#LEARNING_THREADS}。
+     * 这里只保留与并发度无关的池参数，并给出仓库内可用的默认值。
+     */
+    private int keepAlive = 60;
+    private int queueCapacity = 64;
+    private String threadNamePrefix = "priority-pool-";
+    private boolean allowCoreThreadTimeout = false;
 }

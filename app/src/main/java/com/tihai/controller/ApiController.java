@@ -1,11 +1,15 @@
 package com.tihai.controller;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.tihai.common.ChapterPoint;
 import com.tihai.common.CoursePoint;
 import com.tihai.common.Job;
 import com.tihai.common.R;
+import com.tihai.domain.chaoxing.SuperStarTask;
 import com.tihai.domain.chaoxing.WkUser;
 import com.tihai.dubbo.pojo.course.Course;
+import com.tihai.enums.WkTaskStatusEnum;
+import com.tihai.mapper.SuperStarMapper;
 import com.tihai.service.superstar.SuperStarUserService;
 import com.tihai.utils.CourseUtil;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,8 +28,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+
 
 /**
  * 客户端只读接口。
@@ -54,6 +57,9 @@ public class ApiController {
     @Autowired
     private SuperStarUserService userService;
 
+    @Autowired
+    private SuperStarMapper superStarMapper;
+
     /** 课程列表缓存：key = account，value = [时间戳, 数据] */
     private static final Map<String, Object[]> COURSES_CACHE = new ConcurrentHashMap<>();
     private static final long COURSES_TTL_MS = 60_000L;
@@ -71,14 +77,9 @@ public class ApiController {
      */
     private static final long POINTS_STUCK_MS = 10 * 60_000L;
 
-    /**
-     * 拉任务点的并发度。刻意压到 2：{@code getJobList} 每章要发 1~3 次 cards 请求
-     * （num=0/1/2）且占位页还会重试，并发太高容易被超星风控（9010）。
-     */
-    private static final int POINTS_CONCURRENCY = 2;
 
-    /** 后台扫描线程池。扫描本身内部还会再开小池，这里只需容纳「同时几门课在扫」。 */
-    private static final ExecutorService SCAN_POOL = Executors.newFixedThreadPool(2, r -> {
+    /** 后台扫描线程池。扫描本身也是串行，一次只扫一门课的章节。 */
+    private static final ExecutorService SCAN_POOL = Executors.newFixedThreadPool(1, r -> {
         Thread t = new Thread(r, "api-points-scan");
         t.setDaemon(true);
         return t;
@@ -241,6 +242,24 @@ public class ApiController {
         st.startedAt = System.currentTimeMillis();
         CourseUtil cu = courseUtil.forkSession();
         try {
+            // 与学习线程错峰：正在刷课时先等几秒，避免同一账号同时请求
+            for (int i = 0; i < 3; i++) {
+                List<SuperStarTask> learning = superStarMapper.selectList(
+                        new LambdaQueryWrapper<SuperStarTask>()
+                                .eq(SuperStarTask::getStatus, WkTaskStatusEnum.PROCESSING.getCode())
+                                .last("LIMIT 1"));
+                if (learning == null || learning.isEmpty()) {
+                    break;
+                }
+                try {
+                    Thread.sleep(5000L);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            CourseUtil.awaitRiskClear("任务点扫描: " + courseId);
+
             cu.setCookies(user.getCookies());
             cu.setAccount(account);
 
@@ -290,44 +309,31 @@ public class ApiController {
             }
 
             if (!todo.isEmpty()) {
-                final Course tgt = target;
-                final String cid = courseId;
-                ExecutorService pool = Executors.newFixedThreadPool(
-                        Math.min(POINTS_CONCURRENCY, todo.size()));
-                try {
-                    List<Future<List<Job>>> futures = new ArrayList<>();
-                    for (ChapterPoint ch : todo) {
-                        futures.add(pool.submit(() ->
-                                cu.getJobList(tgt.getClazzId(), cid,
-                                        tgt.getCpi(), ch.getId(), true).getFirst()));
-                    }
-                    for (int i = 0; i < todo.size(); i++) {
-                        ChapterPoint ch = todo.get(i);
-                        try {
-                            List<Job> jobs = futures.get(i).get(120, TimeUnit.SECONDS);
-                            if (jobs != null) {
-                                for (Job j : jobs) {
-                                    Map<String, Object> m = new LinkedHashMap<>();
-                                    m.put("chapterId", ch.getId());
-                                    m.put("chapter", ch.getTitle());
-                                    m.put("type", j.getType());
-                                    m.put("name", j.getName() != null ? j.getName() : j.getTitle());
-                                    m.put("jobId", j.getJobId());
-                                    m.put("duration", j.getAttDuration());
-                                    m.put("passed", j.getPassed());
-                                    m.put("playTime", j.getPlayTime());
-                                    synchronized (st.jobs) {
-                                        st.jobs.add(m);
-                                    }
+                // 串行扫描：按章节顺序逐章拉 cards 页，单章失败不影响整门课
+                for (ChapterPoint ch : todo) {
+                    try {
+                        List<Job> jobs = cu.getJobList(target.getClazzId(), courseId,
+                                target.getCpi(), ch.getId(), true).getFirst();
+                        if (jobs != null) {
+                            for (Job j : jobs) {
+                                Map<String, Object> m = new LinkedHashMap<>();
+                                m.put("chapterId", ch.getId());
+                                m.put("chapter", ch.getTitle());
+                                m.put("type", j.getType());
+                                m.put("name", j.getName() != null ? j.getName() : j.getTitle());
+                                m.put("jobId", j.getJobId());
+                                m.put("duration", j.getAttDuration());
+                                m.put("passed", j.getPassed());
+                                m.put("playTime", j.getPlayTime());
+                                synchronized (st.jobs) {
+                                    st.jobs.add(m);
                                 }
                             }
-                        } catch (Exception ignore) {
-                            // 单章失败不影响整门课
                         }
-                        st.scanned++;
+                    } catch (Exception ignore) {
+                        // 单章失败不影响整门课
                     }
-                } finally {
-                    pool.shutdownNow();
+                    st.scanned++;
                 }
             }
         } catch (Throwable e) {

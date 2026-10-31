@@ -177,9 +177,7 @@ function viewOverview(d) {
         </div>
         <div class="live-meta">播放位置 ${fmtDur(v.position)} / ${fmtDur(v.duration)}
           · 已进行 ${fmtDur(v.elapsed)}${v.round > 1 ? ` · 第 ${v.round} 遍` : ''}</div>
-        ${(v.divisor && v.divisor > 1)
-          ? `<div class="live-hint">已进行 ≈ 位置 × ${v.divisor}：${v.divisor} 个刷课线程共用 ${fmtDur(((d.settings && d.settings.video_report_pace_ms) || 60000) / 1000)} 上报间隔（超星按账号风控，多线程须排队），位置以 1/${v.divisor} 速度推进，总进度不变</div>`
-          : ''}
+
       </div>`).join('') + `</div>`;
   }
 
@@ -222,9 +220,7 @@ function viewOverview(d) {
         <dt>服务状态</dt><dd>${svcOk ? '正常' : '未就绪'}</dd>
         <dt>部署目录</dt><dd>${esc(d.services.root)}</dd>
         <dt>日志文件</dt><dd>${esc(d.services.log)}</dd>
-        <dt>上报节奏</dt><dd>${d.settings.video_report_pace_ms} ms / 条</dd>
-        <dt>并发线程</dt><dd>${d.settings.core_size}</dd>
-        <dt>跳过任务点</dt><dd>${esc((d.settings.skip_job_types || []).join(', ') || '（无）')}</dd>
+        <dt>刷课方式</dt><dd>单课串行 · 真实播放节奏（不倍速）· 断点续刷开启</dd>
         <dt>防休眠</dt><dd>${d.settings.keep_awake
           ? (d.keep_awake && d.keep_awake.active ? '已开启 · 生效中' : '已开启')
           : '已关闭'}</dd>
@@ -245,10 +241,17 @@ function viewCourses(d) {
     const tagCls = c.tag === 'ok' ? 'tag-ok' : c.tag === 'err' ? 'tag-err'
                  : c.tag === 'run' ? 'tag-accent' : 'tag';
     const job = c.currentJob || (c.error ? c.error : (c.remark || ''));
+    const resumeParts = [];
+    if (c.tag !== 'ok') {
+      if (c.chapter != null) resumeParts.push(`第 ${(c.chapter || 0) + 1} 章`);
+      if (c.failedChapterCount) resumeParts.push(`失败 ${c.failedChapterCount} 章`);
+      if (c.resumeVideoSeconds) resumeParts.push(`续播 ${fmtDur(c.resumeVideoSeconds)}`);
+    }
+    const resumeText = resumeParts.join(' · ');
     return `<div class="course-row">
       <div>
         <div class="course-name" title="${esc(c.courseName)}">${esc(c.courseName || '—')}</div>
-        <div class="course-sub">${esc(c.courseId)} · 优先级 ${c.priority}</div>
+        <div class="course-sub">${esc(c.courseId)} · 优先级 ${c.priority}${resumeText ? ` · ${esc(resumeText)}` : ''}</div>
       </div>
       <div><span class="tag ${tagCls}">${esc(c.statusText)}</span></div>
       <div class="bar-row">
@@ -263,6 +266,8 @@ function viewCourses(d) {
                 data-name="${esc(c.courseName)}">任务点</button>
         <button class="btn btn-ghost" data-act="prio" data-id="${esc(c.id)}"
                 data-prio="${c.priority}">优先级</button>
+        ${(c.retryLimitReached || c.tag === 'err')
+          ? `<button class="btn btn-ghost" data-act="row-reset" data-id="${esc(c.id)}">续刷</button>` : ''}
         <button class="btn btn-danger" data-act="del" data-id="${esc(c.id)}"
                 data-name="${esc(c.courseName)}">移除</button>
       </div>
@@ -297,15 +302,17 @@ function viewEnroll(d) {
   } else if (!S.enroll.courses.length) {
     listHtml = `<div class="empty">账号下没有查到课程</div>`;
   } else {
-    const inQueue = new Set(d.queue.map(c => String(c.courseId)));
+    const queued = new Map(d.queue.map(c => [String(c.courseId), c]));
     listHtml = `<div class="check-list">` + S.enroll.courses.map(c => {
       const cid = String(c.courseId);
-      const already = inQueue.has(cid);
+      const q = queued.get(cid);
+      const done = !!(q && q.tag === 'ok');
+      const locked = !!q && !done;
       return `<label class="check-item">
         <input type="checkbox" data-act="pick" data-id="${esc(cid)}"
-               ${picked.has(cid) ? 'checked' : ''} ${already ? 'disabled' : ''}>
+               ${picked.has(cid) ? 'checked' : ''} ${locked ? 'disabled' : ''}>
         <span class="check-title">${esc(c.title || '(无标题)')}</span>
-        <span class="check-sub">${esc(cid)}${already ? ' · 已在队列' : ''}</span>
+        <span class="check-sub">${esc(cid)}${q ? (done ? ' · 已完成，可重新复核' : ' · 已在队列') : ''}</span>
       </label>`;
     }).join('') + `</div>`;
   }
@@ -362,118 +369,12 @@ function viewEnroll(d) {
 /* ---------------- 设置 ---------------- */
 function viewSettings(d) {
   const s = d.settings;
-  const types = ['document', 'read', 'hyperlink'];
-  const typeNames = { document: '文档', read: '阅读', hyperlink: '超链接' };
 
   return `<div class="view-inner">
     <div class="panel">
       <div class="panel-head">
-        <span class="panel-title">刷课参数</span>
-        <span class="hint">保存后需要重启后端才生效</span>
-      </div>
-
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">视频上报间隔</div>
-          <div class="setting-desc">两条上报之间真实等多久（毫秒）。<b>不要低于 30000</b> —— 实测 10 秒一条会触发超星账号级风控。</div>
-        </div>
-        <div class="setting-input">
-          <input class="field mono" id="set-pace" type="number" min="3000" step="1000"
-                 value="${s.video_report_pace_ms}">
-        </div>
-      </div>
-
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">并发线程数</div>
-          <div class="setting-desc">同时刷几门课。视频上报本身是全局排队节流的，这个值只决定同时扫描几门课。</div>
-        </div>
-        <div class="setting-input">
-          <input class="field mono" id="set-core" type="number" min="1" max="10" value="${s.core_size}">
-        </div>
-      </div>
-
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">单视频最大重复遍数</div>
-          <div class="setting-desc">超星偶尔要第二遍才落分。越大越慢，2 一般够用。</div>
-        </div>
-        <div class="setting-input">
-          <input class="field mono" id="set-rounds" type="number" min="1" max="5" value="${s.video_max_rounds}">
-        </div>
-      </div>
-
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">视频断点续播</div>
-          <div class="setting-desc">
-            开启后，视频从上次播到的位置接着上报，不再每次从头播一遍。<br>
-            <b>中途起报有可能被超星判成「跳播」触发风控</b>，刷不动时先把它关掉。
-          </div>
-        </div>
-        <div class="setting-input">
-          <label class="check-item" style="padding-left:0">
-            <input type="checkbox" id="set-resume-video" ${s.resume_video ? 'checked' : ''}>
-            <span class="check-title" style="font-size:var(--t-sm)">从中断处续播</span>
-            <span class="check-sub">${s.resume_video ? '已开启' : '已关闭（默认）'}</span>
-          </label>
-        </div>
-      </div>
-
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">全局跳过的任务点类型</div>
-          <div class="setting-desc">对所有课程生效。勾选后这类任务点直接跳过，不消耗刷课时间。</div>
-        </div>
-        <div class="setting-input">
-          ${types.map(t => `
-            <label class="check-item" style="padding-left:0">
-              <input type="checkbox" data-act="skip" data-type="${t}"
-                     ${(s.skip_job_types || []).includes(t) ? 'checked' : ''}>
-              <span class="check-title" style="font-size:var(--t-sm)">${esc(typeNames[t])}</span>
-              <span class="check-sub">${t}</span>
-            </label>`).join('')}
-        </div>
-      </div>
-
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">只刷视频的课程 ID</div>
-          <div class="setting-desc">每行一个 courseId。命中这些课程时，除视频外的任务点全部跳过。</div>
-        </div>
-        <div class="setting-input">
-          <textarea class="field mono" id="set-video-only" rows="4"
-                    placeholder="每行一个 courseId，例如 268045661">${esc((s.video_only_course_ids || []).join('\n'))}</textarea>
-        </div>
-      </div>
-
-      <div class="setting-row">
-        <div>
-          <div class="setting-name">更新下载镜像</div>
-          <div class="setting-desc">
-            官方 GitHub 优先，只有它下不动或者慢到离谱才换镜像（每个文件都做 SHA256 校验，
-            镜像被篡改会直接拒绝）。<br>
-            留空 = 用内置列表（ghfast.top、gh-proxy.com）；填 <span class="mono">-</span> = 只用官方；
-            也可以自己写前缀，多个用逗号隔开。
-          </div>
-        </div>
-        <div class="setting-input">
-          <input class="field mono" id="set-update-mirror" type="text"
-                 placeholder="留空=内置镜像，- = 只用官方"
-                 value="${esc(s.update_mirror || '')}">
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:var(--s4)">
-        <button class="btn btn-primary" data-act="save-settings">保存设置</button>
-        <button class="btn" data-act="restart-backend">保存并重启后端</button>
-      </div>
-    </div>
-
-    <div class="panel" style="margin-top:var(--s4)">
-      <div class="panel-head">
         <span class="panel-title">运行选项</span>
-        <span class="hint">改这里立刻生效，不用重启后端</span>
+        <span class="hint">保存后立即生效</span>
       </div>
 
       <div class="setting-row">
@@ -497,6 +398,10 @@ function viewSettings(d) {
             <span class="check-sub">${d.keep_awake && d.keep_awake.active ? '生效中' : '已关闭'}</span>
           </label>
         </div>
+      </div>
+
+      <div class="row" style="margin-top:var(--s4)">
+        <button class="btn btn-primary" data-act="save-settings">保存设置</button>
       </div>
     </div>
 
@@ -881,22 +786,20 @@ async function doPriority(id, cur) {
   const n = parseInt(v, 10);
   if (!n || n < 1 || n > 10) { toast('优先级要在 1~10 之间', 'err'); return; }
   const r = await api('/api/course/' + encodeURIComponent(id), { method: 'PATCH', body: { priority: n } });
-  toast(r.ok ? '优先级已更新（重启后端后重新排序）' : '操作失败', r.ok ? 'ok' : 'err');
+  toast(r.ok ? '优先级已更新（下一次排队生效）' : (r.error || '操作失败'), r.ok ? 'ok' : 'err');
+  poll();
+}
+
+async function doRowReset() {
+  const r = await api('/api/queue/reset', { method: 'POST' });
+  const msgs = (r && r.messages) ? r.messages.join(' ｜ ') : ((r && r.error) || '续刷失败');
+  toast(msgs, r.ok ? 'ok' : 'err');
   poll();
 }
 
 function collectSettings() {
-  const skip = $$('input[data-act="skip"]').filter(i => i.checked).map(i => i.dataset.type);
-  const videoOnly = ($('#set-video-only') || {}).value || '';
   return {
-    video_report_pace_ms: parseInt(($('#set-pace') || {}).value || '60000', 10),
-    core_size: parseInt(($('#set-core') || {}).value || '3', 10),
-    video_max_rounds: parseInt(($('#set-rounds') || {}).value || '2', 10),
-    resume_video: !!($('#set-resume-video') || {}).checked,
-    skip_job_types: skip,
-    video_only_course_ids: videoOnly.split(/[\s,]+/).map(s => s.trim()).filter(Boolean),
     keep_awake: !!($('#set-keep-awake') || {}).checked,
-    update_mirror: (($('#set-update-mirror') || {}).value || '').trim(),
   };
 }
 
@@ -911,19 +814,10 @@ async function toggleKeepAwake(el) {
   poll();
 }
 
-async function doSaveSettings(restart) {
+async function doSaveSettings() {
   const r = await api('/api/settings', { method: 'POST', body: collectSettings() });
   if (!r.ok) { toast('保存失败', 'err'); return; }
-  if (restart) {
-    toast('设置已保存，正在重启后端…');
-    S.busy = true;
-    await api('/api/service/stop', { method: 'POST' });
-    const r2 = await api('/api/service/start', { method: 'POST' });
-    toast((r2.messages || []).join(' ｜ ') || '已重启', 'ok');
-    S.busy = false;
-  } else {
-    toast('设置已保存（重启后端后生效）', 'ok');
-  }
+  toast('设置已保存并生效', 'ok');
   poll();
 }
 
@@ -967,10 +861,10 @@ document.addEventListener('click', async (e) => {
   if (act === 'points-refresh') return showPoints(el.dataset.id, el.dataset.name, true);
   if (act === 'del') return doRemove(el.dataset.id, el.dataset.name);
   if (act === 'prio') return doPriority(el.dataset.id, el.dataset.prio);
+  if (act === 'row-reset') return doRowReset();
   if (act === 'login') return doLogin();
   if (act === 'enroll') return doEnroll();
-  if (act === 'save-settings') return doSaveSettings(false);
-  if (act === 'restart-backend') return doSaveSettings(true);
+  if (act === 'save-settings') return doSaveSettings();
   if (act === 'update-check') return doUpdateCheck();
   if (act === 'update-apply') return doUpdateApply(el.dataset.mode);
 });

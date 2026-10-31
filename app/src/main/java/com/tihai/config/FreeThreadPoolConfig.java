@@ -1,5 +1,6 @@
 package com.tihai.config;
 
+import com.tihai.constant.StudyPolicy;
 import com.tihai.factory.CustomThreadFactory;
 import com.tihai.factory.PriorityRejectPolicy;
 import com.tihai.properties.ThreadPoolProperties;
@@ -27,16 +28,16 @@ public class FreeThreadPoolConfig {
     @Bean
     public ThreadPoolExecutor customThreadPool(ThreadPoolProperties config) {
 
-
-        // 这是正常启动信息，用 error 级别会让客户端日志页把它标成红色告警
-        log.info("当前核心线程数为:{}", config.getCoreSize());
+        // 单课串行是硬约束：核心 / 最大线程都固定为 1，不接受外部覆盖。
+        int threads = StudyPolicy.LEARNING_THREADS;
+        log.info("当前学习线程数固定为:{}", threads);
         // 创建优先级阻塞队列
         BlockingQueue<Runnable> queue = new PriorityBlockingQueue<>(config.getQueueCapacity());
 
         // 构建线程池
         ThreadPoolExecutor executor = new ThreadPoolExecutor(
-                config.getCoreSize(),
-                config.getMaxSize(),
+                threads,
+                threads,
                 config.getKeepAlive(),
                 TimeUnit.SECONDS,
                 queue,

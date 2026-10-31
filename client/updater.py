@@ -196,15 +196,7 @@ class Updater:
         return r or DEFAULT_REPO
 
     def mirrors(self):
-        """返回镜像前缀/模板列表。设置里留空用内置列表，填 '-' 就只用官方。"""
-        try:
-            raw = str(self._settings().data.get("update_mirror") or "").strip()
-        except Exception:
-            raw = ""
-        if raw in ("-", "off", "none", "no", "0"):
-            return []
-        if raw:
-            return [x for x in re.split(r"[\s,;]+", raw) if x]
+        """镜像列表固定内置，不再作为用户可配置项。"""
         return list(DEFAULT_MIRRORS)
 
     def _mirror_url(self, mirror, browser_url):

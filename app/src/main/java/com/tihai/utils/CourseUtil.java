@@ -2,13 +2,14 @@ package com.tihai.utils;
 
 import com.alibaba.nacos.api.exception.NacosException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.tihai.common.*;
 import com.tihai.common.GlobalConst;
 import com.tihai.constant.JobTypeConstant;
+import com.tihai.constant.StudyPolicy;
 import com.tihai.domain.chaoxing.SuperStarLog;
 import com.tihai.domain.chaoxing.WkUser;
 import com.tihai.dubbo.pojo.course.Course;
-import com.tihai.properties.StudyProperties;
 import com.tihai.service.superstar.SuperStarCookieService;
 import com.tihai.service.superstar.SuperStarLogService;
 import okhttp3.*;
@@ -59,8 +60,6 @@ public class CourseUtil {
     @Autowired
     private ServerInfoUtil serverInfoUtil;
 
-    @Autowired
-    private StudyProperties studyProperties;
 
     public void setAccount(String account) {
         this.account = account;
@@ -89,7 +88,7 @@ public class CourseUtil {
         c.superStarLogService = this.superStarLogService;
         c.cookieService = this.cookieService;
         c.serverInfoUtil = this.serverInfoUtil;
-        c.studyProperties = this.studyProperties;
+
         c.cookies = (this.cookies == null) ? null : new LinkedHashMap<>(this.cookies);
         c.cookieList = new ArrayList<>(this.cookieList);
         c.account = this.account;
@@ -648,19 +647,17 @@ public class CourseUtil {
     }
 
     // ========================================================================
-    // 全局上报限速器
+    // 上报节拍器
     //
-    // 超星的风控是**按账号**的：多线程同时上报本身就是异常特征。
-    // 之前 10 个线程各自 100 毫秒连发，等于给服务端每秒几十次上报，
-    // 直接被判定为「操作异常」。所以所有线程必须共用一个最小间隔，排队上报。
+    // 单课串行下只有一个学习线程，但上报间隔仍要严格绑定本次推进的播放秒数：
+    // 推进 N 秒就必须真实等待 N 秒，保证 1 秒/秒的真实播放节奏（不倍速）。
     // ========================================================================
     private static final Object LOG_RATE_LOCK = new Object();
     private static volatile long lastLogAt = 0L;
 
-    /** 所有线程共用的上报节流：保证任意两次 log 请求之间至少隔 minIntervalMs 毫秒。 */
-    private void awaitLogSlot() throws InterruptedException {
-        long minIntervalMs = studyProperties.getVideoReportPaceMs() == null
-                ? 10000L : studyProperties.getVideoReportPaceMs().longValue();
+    /** 保证任意两次 log 请求之间至少隔 stepSeconds 秒。 */
+    private void awaitReportSlot(int stepSeconds) throws InterruptedException {
+        long minIntervalMs = Math.max(1000L, stepSeconds * 1000L);
         synchronized (LOG_RATE_LOCK) {
             long wait = lastLogAt + minIntervalMs - System.currentTimeMillis();
             if (wait > 0) {
@@ -698,6 +695,59 @@ public class CourseUtil {
     }
 
     /**
+     * 读取断点续播位置（秒）。
+     *
+     * <p>取「本地最后成功上报位置」与「平台 cards 页 playTime」的较大值：
+     * 本地位置保证进程重启后不后退，平台位置兜住本地断点丢失的情况。
+     * 结果钳制在 {@code [0, duration - step]}，避免 playingTime 越界被服务端拒绝；
+     * 本地断点属于别的任务点时只采用平台位置。
+     */
+    public long readVideoResumePoint(SuperStarLog log, Job job, long duration, int step) {
+        long cap = Math.max(0L, duration - Math.max(1, step));
+        long local = 0L;
+        if (log != null && job != null
+                && log.getVideoPositionJobId() != null
+                && log.getVideoPositionJobId().equals(job.getJobId())
+                && log.getVideoPositionSeconds() != null) {
+            local = log.getVideoPositionSeconds().longValue();
+        }
+        long platform = (job != null && job.getPlayTime() != null && job.getPlayTime() > 0)
+                ? job.getPlayTime() / 1000L : 0L;
+        long point = Math.max(local, platform);
+        if (point < 0) {
+            point = 0L;
+        }
+        if (point > cap) {
+            System.out.println(Thread.currentThread().getName()
+                    + "续播点超过可续播范围，已回退: " + point + "s -> " + cap + "s");
+            point = cap;
+        }
+        return point;
+    }
+
+    /**
+     * 持久化视频断点。只按 id 更新两列，不整行覆盖，避免把章节指针等字段写回旧值。
+     * 写失败只记日志，不影响当前这轮上报。
+     */
+    public void saveVideoResumePoint(SuperStarLog log, Job job, long position) {
+        if (log == null || log.getId() == null || job == null) {
+            return;
+        }
+        try {
+            LambdaUpdateWrapper<SuperStarLog> wrapper = new LambdaUpdateWrapper<>();
+            wrapper.eq(SuperStarLog::getId, log.getId())
+                    .set(SuperStarLog::getVideoPositionSeconds, position)
+                    .set(SuperStarLog::getVideoPositionJobId, job.getJobId());
+            superStarLogService.update(null, wrapper);
+            log.setVideoPositionSeconds(position);
+            log.setVideoPositionJobId(job.getJobId());
+        } catch (Exception e) {
+            System.out.println(Thread.currentThread().getName()
+                    + "断点写入失败（不影响上报）: " + e.getMessage());
+        }
+    }
+
+    /**
      * 视频播放进度日志
      *
      * @param isdrag 上报类型，取值与超星播放器源码（videojs-ext）里 sendLog 的 switch 一致：
@@ -723,7 +773,8 @@ public class CourseUtil {
      */
     public VideoLogResult videoProgressLog(OkHttpClient session, Course course,
                                            Job job, JobInfo jobInfo, String dtoken, long duration,
-                                           long playingTime, String isdrag, String type) throws Exception {
+                                           long playingTime, String isdrag, String type,
+                                           int stepSeconds) throws Exception {
         VideoLogResult result = new VideoLogResult();
         String midText;
         if (job.getOtherInfo().contains("courseId")) {
@@ -771,7 +822,8 @@ public class CourseUtil {
                             playingTime, duration, getValue("_uid")),
                     possibleRt, vfce, type, getTimestamp(), attDuration, ade);
             Request request = new Request.Builder().url(url).build();
-            awaitLogSlot();     // 全局限速：风控是按账号的，多线程必须排队
+            // 真实节奏：本次推进多少秒，就真实等多少秒再发下一条
+            awaitReportSlot(stepSeconds);
             if (isRiskBlocked()) {
                 // 在限速队列里排队期间，别的线程撞上了风控。这一条也不能发 ——
                 // 超星的风控窗口按「最后一次请求」滚动，漏一条就续期一次。
@@ -990,14 +1042,13 @@ public class CourseUtil {
      *
      * <p>⚠️ 为什么不能再「连发抢分」：老实现按 100 毫秒连发最多 5000 条满时长上报，
      * 把账号直接打到超星风控，结果反而<b>一条都刷不完</b>（详见 RISK_BACKOFF_MS 的注释）。
-     * 现在完全按播放器节奏：每 {@code reportTimeInterval} 秒播放进度一条，两条之间
-     * 墙钟间隔由 {@code study.chaoxing.video-report-pace-ms} 控制（默认 10 秒，
-     * 是在「不被风控」前提下能压到的最快值；设成 60000 就是字面意义的正常播放）。
+     * 现在完全按播放器节奏：每 {@code reportTimeInterval} 秒播放进度一条，
+     * 两条之间的真实等待时间等于本次推进的播放秒数（1 秒/秒，不倍速）。
      *
      * @return true = 超星已确认这个任务点通过（isPassed）；false = 未通过
      */
     public boolean studyVideo(Course course, Job job, JobInfo jobInfo,
-                              double speed, String type, SuperStarLog log) throws Exception {
+                              String type, SuperStarLog log) throws Exception {
 
         // 风控退避期内连 ananas/status 都不要发：窗口是按「最后一次请求」滚动的，
         // 漏一条出去就把退避续期，于是永远等不到解除。
@@ -1022,17 +1073,12 @@ public class CourseUtil {
         // 播放器自己的节奏：cards 页 defaults.reportTimeInterval（实测 = 60）
         int step = (jobInfo != null && jobInfo.getReportTimeInterval() > 0)
                 ? jobInfo.getReportTimeInterval()
-                : (studyProperties.getVideoReportStepSeconds() == null
-                ? 60 : studyProperties.getVideoReportStepSeconds());
-        long paceMs = studyProperties.getVideoReportPaceMs() == null
-                ? 10000L : studyProperties.getVideoReportPaceMs().longValue();
-        int maxRounds = studyProperties.getVideoMaxRounds() == null
-                ? 3 : studyProperties.getVideoMaxRounds();
+                : StudyPolicy.DEFAULT_STEP_SECONDS;
+        int maxRounds = StudyPolicy.MAX_ROUNDS;
 
         System.out.println(Thread.currentThread().getName() + "开始学习视频: "
                 + "课程名:" + course.getTitle() + " " + "任务名:" + job.getName()
-                + " 时长:" + duration + "s" + " 上报步长:" + step + "s"
-                + " 墙钟间隔:" + paceMs + "ms"
+                + " 时长:" + duration + "s" + " 真实节奏 步长:" + step + "s"
                 // 给客户端算「已播多久」用的绝对起点。这些 println 没有日志框架的
                 // 时间戳，客户端只能靠「自己第一次读到这行的时间」推算，
                 // 一重启就把进度归零。带上 epoch 毫秒后，进度立刻准确。
@@ -1052,9 +1098,8 @@ public class CourseUtil {
         VideoLogResult lastBlocked = null;   // 最近一次被拒的响应，用于日志定位
         final int maxBlockedWaits = 3;   // 退避 3 分钟起步且逐次翻倍，等 3 次还没戏就放手
 
-        // 注意：命中风控**不消耗** rounds —— 等退避结束会重试同一个视频，
-        // 而不是把这个任务点丢掉。老实现一命中就 return false，
-        // 结果 8 个视频全军覆没、0 个计分。
+        // 命中的退避结束、并且服务端恢复回应后，从最后成功位置继续，
+        // 不把这一遍已上报的区间重放一遍。
         while (rounds < maxRounds && !passed) {
             if (isRiskBlocked()) {
                 if (blockedWaits >= maxBlockedWaits) {
@@ -1084,30 +1129,20 @@ public class CourseUtil {
             }
             rounds++;
 
-            // 断点续播（默认关闭，开关 study.chaoxing.resume-video）。
-            // cards 页本来就返回了 playTime（毫秒），但以前只给只读接口展示用，
-            // 刷课路径一律从 0 开始上报 —— 这就是「视频看到一半、重开又从头上报」的原因。
-            // 超星的 enc 校验要求 playingTime < duration，所以钳在 duration - step 以内。
-            // 只在第一遍生效：第二遍起必须完整播放，服务端才会判 isPassed。
-            long startPt = 0L;
-            if (rounds == 1
-                    && Boolean.TRUE.equals(studyProperties.getResumeVideo())
-                    && job.getPlayTime() != null) {
-                long fromCards = job.getPlayTime() / 1000L;
-                long cap = Math.max(0L, duration - step);
-                startPt = Math.min(Math.max(0L, fromCards), cap);
-                if (startPt > 0) {
-                    System.out.println(Thread.currentThread().getName()
-                            + "断点续播: " + job.getName()
-                            + " 从 " + startPt + "s / " + duration + "s 接着播");
-                }
+            // 断点续刷默认开启：每遍开头从「本地最后成功位置」与「平台 playTime」
+            // 取较大值继续，不再从 0 重播。
+            long startPt = readVideoResumePoint(log, job, duration, step);
+            if (startPt > 0) {
+                System.out.println(Thread.currentThread().getName()
+                        + "断点续播: " + job.getName()
+                        + " 从 " + startPt + "s / " + duration + "s 继续");
             }
             // 从 0 开始用 isdrag=3（开始播放）；中途起播用 isdrag=2（seek 结束）
             String firstDrag = startPt > 0 ? "2" : "3";
 
             // ① 开始播放
             VideoLogResult r = videoProgressLog(session, course, job, jobInfo,
-                    dtoken, duration, startPt, firstDrag, type);
+                    dtoken, duration, startPt, firstDrag, type, step);
             reports++;
             if (r.blocked) {
                 if (lastBlocked == null) {
@@ -1119,21 +1154,24 @@ public class CourseUtil {
                 rounds--;        // 这一遍压根没发出去，不算数
                 continue;
             }
+            // 首条上报成功就落一次断点，进程随时被杀都不会丢进度
+            saveVideoResumePoint(log, job, startPt);
             if (r.isPassed) {
                 passed = true;
+                saveVideoResumePoint(log, job, duration);
                 break;
             }
-            // 注意：两条上报之间的等待由 awaitLogSlot() 统一节流，
-            // 这里不再单独 sleep，否则会叠加成两倍间隔。
 
             // ② 播放中：每 step 秒播放进度一条；走到满时长那条用 isdrag=4（播放完毕）
+            //    每条上报前的等待由 videoProgressLog 内的 awaitReportSlot(step) 保证：
+            //    推进 N 秒就真实等待 N 秒，即 1 秒/秒，不存在倍速。
             long pt = startPt;
             boolean roundBlocked = false;
             while (pt < duration) {
                 pt = Math.min(pt + step, duration);
                 String isdrag = (pt >= duration) ? "4" : "0";
                 r = videoProgressLog(session, course, job, jobInfo,
-                        dtoken, duration, pt, isdrag, type);
+                        dtoken, duration, pt, isdrag, type, step);
                 reports++;
                 if (r.blocked) {
                     if (lastBlocked == null) {
@@ -1144,14 +1182,11 @@ public class CourseUtil {
                     roundBlocked = true;
                     break;
                 }
+                saveVideoResumePoint(log, job, pt);
                 if (r.isPassed) {
                     passed = true;
                     break;
                 }
-                // 上报节流是**全局**的（任意两次上报间隔 >= paceMs，多线程排队），
-                // 所以墙钟时间远大于真实播放位置：3 个线程时每条视频要 3 倍时间。
-                // 客户端若按墙钟推算进度，会算出 >100%。这里把真实位置打出来。
-                // 注意 rounds 在进入本轮循环时已 ++（见上方），这里就是当前遍数
                 System.out.println(Thread.currentThread().getName() + "播放位置: "
                         + job.getName() + " " + pt + "s/" + duration + "s"
                         + " 第" + rounds + "遍 第" + reports + "报");
@@ -1161,7 +1196,7 @@ public class CourseUtil {
             }
             if (roundBlocked) {
                 enterRiskBackoff();
-                rounds--;        // 这一遍不算数，退避后重来
+                rounds--;        // 这一遍不算数，退避后从断点继续
             }
         }
 

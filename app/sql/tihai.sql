@@ -13,6 +13,8 @@ CREATE TABLE `th_wk_log`  (
   `current_chapter_index` int(11) NULL DEFAULT 0 COMMENT '当前章节序号（第几个，从0开始）',
   `chapter_id` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL COMMENT '当前章节id（非序号，防章节顺序变化错位）',
   `failed_chapters` varchar(1024) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL COMMENT '本轮未通过校验的章节id，逗号分隔',
+  `video_position_seconds` int(11) NULL DEFAULT NULL COMMENT '本地上次成功上报的视频位置（秒）',
+  `video_position_job_id` varchar(64) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL COMMENT '位置所属任务点 jobId',
   `current_job_id` int(11) NULL DEFAULT 0 COMMENT '当前任务点id',
   `current_job` varchar(255) CHARACTER SET utf8 COLLATE utf8_general_ci NULL DEFAULT NULL COMMENT '当前任务点',
   `current_progress` decimal(10, 2) NULL DEFAULT NULL COMMENT '实时进度',

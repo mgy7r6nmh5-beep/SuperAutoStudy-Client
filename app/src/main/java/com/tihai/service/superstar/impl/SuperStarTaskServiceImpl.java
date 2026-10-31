@@ -7,7 +7,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.tihai.common.*;
 import com.tihai.constant.GlobalConstant;
 import com.tihai.constant.JobTypeConstant;
-import com.tihai.constant.RetryConstant;
+import com.tihai.constant.StudyPolicy;
 import com.tihai.domain.chaoxing.SuperStarLog;
 import com.tihai.domain.chaoxing.SuperStarTask;
 import com.tihai.domain.chaoxing.WkUser;
@@ -20,7 +20,7 @@ import com.tihai.factory.CustomThreadFactory;
 import com.tihai.factory.PriorityRejectPolicy;
 import com.tihai.manager.RollBackManager;
 import com.tihai.mapper.SuperStarMapper;
-import com.tihai.properties.StudyProperties;
+
 import com.tihai.properties.ThreadPoolProperties;
 import com.tihai.queue.PriorityTaskWrapper;
 import com.tihai.service.superstar.SuperStarLogService;
@@ -81,8 +81,6 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
     @Autowired
     private ThreadPoolProperties config;
 
-    @Autowired
-    private StudyProperties studyProperties;
 
 
     private volatile boolean isShuttingDown = false;
@@ -161,8 +159,7 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                     if (dbTask != null &&
                             (WkTaskStatusEnum.PROCESSING.getCode().equals(dbTask.getStatus()) ||
                                     WkTaskStatusEnum.EXAM.getCode().equals(dbTask.getStatus()))) {
-                        dbTask.setStatus(WkTaskStatusEnum.PAUSED.getCode());
-                        this.updateById(dbTask);
+                        markPaused(dbTask);
                     }
                 } catch (Exception e) {
                     log.error("回滚任务状态失败, taskId={}", taskId, e);
@@ -179,10 +176,10 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
 
             BlockingQueue<Runnable> queue = new PriorityBlockingQueue<>(config.getQueueCapacity());
 
-            // 重新构建线程池
+            // 重新构建线程池：学习线程数永远固定为 1
             taskExecutor = new ThreadPoolExecutor(
-                    config.getCoreSize(),
-                    config.getMaxSize(),
+                    StudyPolicy.LEARNING_THREADS,
+                    StudyPolicy.LEARNING_THREADS,
                     config.getKeepAlive(),
                     TimeUnit.SECONDS,
                     queue,
@@ -273,24 +270,46 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
      * @throws NacosException nacos异常
      */
     public void addChaoXingTask(CourseSubmitTaskDTO courseSubmitTaskDTO) throws NacosException {
-        SuperStarTask task = null;
-        if (courseSubmitTaskDTO.getCourseId() == null) {
-            task = getSuperStarTaskByCourseName(courseSubmitTaskDTO.getLoginAccount(), courseSubmitTaskDTO.getCourseName());
-        } else {
-            task = getSuperStarTask(courseSubmitTaskDTO.getLoginAccount(), courseSubmitTaskDTO.getCourseId());
+        if (StringUtils.isBlank(courseSubmitTaskDTO.getLoginAccount())) {
+            throw new IllegalArgumentException("登录账号不能为空");
         }
+        if (StringUtils.isBlank(courseSubmitTaskDTO.getCourseName())) {
+            throw new IllegalArgumentException("课程名称不能为空");
+        }
+        Integer priority = courseSubmitTaskDTO.getPriority();
+        if (priority == null) {
+            priority = StudyPolicy.MIN_PRIORITY;
+        }
+        if (priority < StudyPolicy.MIN_PRIORITY || priority > StudyPolicy.MAX_PRIORITY) {
+            throw new IllegalArgumentException("优先级要在 " + StudyPolicy.MIN_PRIORITY
+                    + "~" + StudyPolicy.MAX_PRIORITY + " 之间");
+        }
+
+        SuperStarTask task = courseSubmitTaskDTO.getCourseId() == null
+                ? getSuperStarTaskByCourseName(courseSubmitTaskDTO.getLoginAccount(), courseSubmitTaskDTO.getCourseName())
+                : getSuperStarTask(courseSubmitTaskDTO.getLoginAccount(), courseSubmitTaskDTO.getCourseId());
         if (task == null) {
             SuperStarTask chaoXingTask = mapperFacade.map(courseSubmitTaskDTO, SuperStarTask.class);
             chaoXingTask.setStatus(WkTaskStatusEnum.PENDING.getCode());
-            chaoXingTask.setId(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"))); //当前version使用UUID
-            chaoXingTask.setPriority(1);
+            chaoXingTask.setId(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS")));
+            chaoXingTask.setPriority(priority);
+            chaoXingTask.setRetryCount(0);
             chaoXingTask.setCreatTime(LocalDateTime.now());
             chaoXingTask.setMachineNum(serverInfoUtil.getCurrentServerInstance());
             this.baseMapper.insert(chaoXingTask);
+        } else if (WkTaskStatusEnum.FINISHED.getCode().equals(task.getStatus())) {
+            // 已完成课程重新加入：重置为待处理并重新复核，不新建重复行（P0-11）
+            LambdaUpdateWrapper<SuperStarTask> reset = new LambdaUpdateWrapper<>();
+            reset.eq(SuperStarTask::getId, task.getId())
+                    .set(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode())
+                    .set(SuperStarTask::getRetryCount, 0)
+                    .set(SuperStarTask::getCreatTime, LocalDateTime.now())
+                    .set(SuperStarTask::getPriority, priority)
+                    .set(SuperStarTask::getMachineNum, serverInfoUtil.getCurrentServerInstance());
+            this.update(null, reset);
         } else {
             throw new BusinessException(BizCodeEnum.TASK_ALREADY_EXIST.getCode(), BizCodeEnum.TASK_ALREADY_EXIST.getMsg());
         }
-        //TODO 这里似乎不太合理,等待后续优化.......
         startChaoxingTask();
     }
 
@@ -299,61 +318,160 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
      */
     @Override
     public synchronized void startChaoxingTask() {
+        if (isShuttingDown || taskExecutor.isShutdown()) {
+            return;
+        }
+        // 单课串行：已有课程在排队或执行时不再认领新的。
+        // 执行完由 finally 里的 scheduleNext() 推进下一门。
+        List<SuperStarTask> active = list(new LambdaQueryWrapper<SuperStarTask>()
+                .in(SuperStarTask::getStatus,
+                        WkTaskStatusEnum.QUEUE.getCode(),
+                        WkTaskStatusEnum.PROCESSING.getCode())
+                .last("LIMIT 1"));
+        if (active != null && !active.isEmpty()) {
+            return;
+        }
+        // 优先级 1 = 最高；同优先级按加入时间先来先刷。
         LambdaQueryWrapper<SuperStarTask> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode());
-        wrapper.le(SuperStarTask::getRetryCount, RetryConstant.DEFAULT_RETRY_COUNT);
-        wrapper.orderByDesc(SuperStarTask::getPriority);
+        wrapper.apply("COALESCE(retry_count, 0) < {0}", StudyPolicy.MAX_AUTO_RETRY);
+        wrapper.orderByAsc(SuperStarTask::getPriority);
+        wrapper.orderByAsc(SuperStarTask::getCreatTime);
+        wrapper.last("LIMIT 1");
         List<SuperStarTask> tasks = list(wrapper);
-//        executeCourseTask(tasks.get(0));
+        if (tasks == null || tasks.isEmpty()) {
+            return;
+        }
+        SuperStarTask task = tasks.get(0);
 
-        for (SuperStarTask task : tasks) {
-            // FIX: 原子认领。原实现是"先 SELECT 出 PENDING，再逐条 updateById 改成 QUEUE"，
-            // 读与写之间没有原子性。而控制台是并发提交多门课、每个 POST 末尾都会调到这里，
-            // 于是多个请求读到同一批 PENDING 任务，把同一门课重复投进线程池
-            // （实测「线性代数」被 3 个线程同时刷同一个视频，5 个线程全被占满，
-            //   后面的「体育（1）」一直排不上队）。
-            // 改成带 WHERE status=PENDING 的条件更新：只有真正把 PENDING 翻转成 QUEUE
-            // 的那一次调用才算认领成功，其余直接跳过。
-            LambdaUpdateWrapper<SuperStarTask> claim = new LambdaUpdateWrapper<>();
-            claim.eq(SuperStarTask::getId, task.getId())
-                    .eq(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode());
+        // 原子认领：只有真正把 PENDING 翻转成 QUEUE 的调用才继续，
+        // 并发进来多次扫描也不会把同一门课重复投进线程池。
+        if (!claim(task.getId())) {
+            return;
+        }
+        task.setStatus(WkTaskStatusEnum.QUEUE.getCode());
+        try {
+            task.setMachineNum(serverInfoUtil.getCurrentServerInstance());
+        } catch (NacosException e) {
+            rollbackToPending(task.getId());
+            throw new RuntimeException(e);
+        }
 
-            task.setStatus(WkTaskStatusEnum.QUEUE.getCode());
+        String runKey = task.getId() != null ? task.getId() : task.getCourseName();
+        Runnable taskWrapper = new PriorityTaskWrapper(() -> {
+            // 同一门课只许一个线程在刷。命中重复时必须把已认领的 QUEUE
+            // 回滚成 PENDING，否则这门课会永远停在「队列中」。
+            if (!RUNNING_TASKS.add(runKey)) {
+                log.warn("跳过重复任务：{}（已有线程在刷这门课）", task.getCourseName());
+                rollbackToPending(task.getId());
+                return;
+            }
             try {
-                task.setMachineNum(serverInfoUtil.getCurrentServerInstance());
-            } catch (NacosException e) {
-                throw new RuntimeException(e);
-            }
-            boolean isUpdated = this.update(task, claim);
-            if (!isUpdated) {
-                continue;   // 已被别的调用认领，跳过，避免重复执行
-            }
-            String runKey = task.getId() != null ? task.getId() : task.getCourseName();
-            Runnable taskWrapper = new PriorityTaskWrapper(() -> {
-                // 同一门课只许一个线程在刷。实测出现过两个 priority-pool 线程
-                // 同时刷同一门课（日志里同一秒两条「开始学习视频」）——两个线程
-                // 都在写同一条 th_wk_log，章节断点指针互相覆盖，续刷就废了。
-                // 这里按任务 id 在进程内去重，后来者直接退出。
-                if (!RUNNING_TASKS.add(runKey)) {
-                    log.warn("跳过重复任务：{}（已有线程在刷这门课）", task.getCourseName());
-                    return;
+                markProcessing(task.getId());
+                executeCourseTask(task);
+            } catch (Exception e) {
+                handleTaskFailure(task, e);
+            } finally {
+                RUNNING_TASKS.remove(runKey);
+                // 正常跑完（已完成 / 异常）才推进下一门；需要原地重试的任务
+                // 留在待处理，等 5 分钟自愈，避免紧密失败循环。
+                if (shouldAdvance(task.getId())) {
+                    scheduleNext();
                 }
-                try {
-                    executeCourseTask(task);
-                } catch (Exception e) {
-                    if (task.getRetryCount() == RetryConstant.DEFAULT_RETRY_COUNT) {
-                        task.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
-                    } else {
-                        task.setRetryCount(task.getRetryCount() + 1);
-                        task.setStatus(WkTaskStatusEnum.PENDING.getCode());
-                    }
-                    this.updateById(task);
-                } finally {
-                    RUNNING_TASKS.remove(runKey);
-                }
-            }, task.getPriority(), task.getId());
+            }
+        }, task.getPriority(), task.getId());
 
-            taskExecutor.execute(taskWrapper);
+        taskExecutor.execute(taskWrapper);
+    }
+
+    private boolean shouldAdvance(String taskId) {
+        SuperStarTask latest = this.getById(taskId);
+        return latest == null
+                || !WkTaskStatusEnum.PENDING.getCode().equals(latest.getStatus());
+    }
+
+    /**
+     * 把 PENDING 原子认领为 QUEUE。
+     */
+    private boolean claim(String taskId) {
+        LambdaUpdateWrapper<SuperStarTask> claim = new LambdaUpdateWrapper<>();
+        claim.eq(SuperStarTask::getId, taskId)
+                .eq(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode())
+                .set(SuperStarTask::getStatus, WkTaskStatusEnum.QUEUE.getCode());
+        return this.update(null, claim);
+    }
+
+    private void rollbackToPending(String taskId) {
+        LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(SuperStarTask::getId, taskId)
+                .eq(SuperStarTask::getStatus, WkTaskStatusEnum.QUEUE.getCode())
+                .set(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode());
+        this.update(null, wrapper);
+    }
+
+    private void markProcessing(String taskId) {
+        LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(SuperStarTask::getId, taskId)
+                .set(SuperStarTask::getStatus, WkTaskStatusEnum.PROCESSING.getCode());
+        this.update(null, wrapper);
+    }
+
+    private void markAbnormal(String taskId) {
+        LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(SuperStarTask::getId, taskId)
+                .set(SuperStarTask::getStatus, WkTaskStatusEnum.ABNORMAL.getCode());
+        this.update(null, wrapper);
+    }
+
+    private void markPaused(SuperStarTask task) {
+        task.setStatus(WkTaskStatusEnum.PAUSED.getCode());
+        this.updateById(task);
+        SuperStarLog log = superStarLogService.getLatestLogByLoginAccount(
+                task.getLoginAccount(), task.getCourseName());
+        if (log != null) {
+            log.setRemark("服务停止，课程暂停");
+            logQueue.offer(log);
+        }
+    }
+
+    /**
+     * 执行线程抛出未捕获异常时的兜底：按 retry_count 决定回待处理还是标异常。
+     */
+    private void handleTaskFailure(SuperStarTask task, Exception e) {
+        int retry = task.getRetryCount() == null ? 0 : task.getRetryCount();
+        LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(SuperStarTask::getId, task.getId());
+        if (retry >= StudyPolicy.MAX_AUTO_RETRY) {
+            wrapper.set(SuperStarTask::getStatus, WkTaskStatusEnum.ABNORMAL.getCode());
+            log.error("课程执行异常且已达自动重试上限: {}", task.getCourseName(), e);
+            SuperStarLog log = superStarLogService.getLatestLogByLoginAccount(
+                    task.getLoginAccount(), task.getCourseName());
+            if (log != null) {
+                log.setErrorMessage("系统异常，已达自动重试上限（" + StudyPolicy.MAX_AUTO_RETRY
+                        + " 轮），可点「续刷 / 重试」恢复");
+                logQueue.offer(log);
+            }
+        } else {
+            wrapper.set(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode())
+                    .set(SuperStarTask::getRetryCount, retry + 1);
+            log.warn("课程执行异常，稍后重试: {}（第 {}/{} 轮）",
+                    task.getCourseName(), retry + 1, StudyPolicy.MAX_AUTO_RETRY, e);
+        }
+        this.update(null, wrapper);
+    }
+
+    /**
+     * 执行完一门课再推进下一门。放到线程池里跑，避免在任务线程里递归调用
+     * 导致调用栈随课程数增长。
+     */
+    private void scheduleNext() {
+        if (isShuttingDown || taskExecutor.isShutdown()) {
+            return;
+        }
+        try {
+            taskExecutor.execute(this::startChaoxingTask);
+        } catch (RejectedExecutionException e) {
+            log.warn("推进下一门课时线程池已关闭，本次不再排队");
         }
     }
 
@@ -385,17 +503,20 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
 
 
         if (user == null || user.getCookies() == null) {
-            if (task.getRetryCount() < RetryConstant.DEFAULT_RETRY_COUNT) {
-                task.setStatus(WkTaskStatusEnum.PENDING.getCode());
-                task.setRetryCount(task.getRetryCount() + 1);
+            int retry = task.getRetryCount() == null ? 0 : task.getRetryCount();
+            if (retry < StudyPolicy.MAX_AUTO_RETRY) {
+                LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
+                wrapper.eq(SuperStarTask::getId, task.getId())
+                        .set(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode())
+                        .set(SuperStarTask::getRetryCount, retry + 1);
+                this.update(null, wrapper);
             } else {
-                task.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
+                markAbnormal(task.getId());
             }
             WkUser wkUser = new WkUser();
             wkUser.setAccount(task.getLoginAccount());
             wkUser.setPassword(task.getPassword());
             loginService.login(wkUser, true);
-            this.updateById(task);
             log.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
             log.setErrorMessage("用户未登录");
             logQueue.offer(log);
@@ -436,9 +557,8 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                 log.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
                 log.setErrorMessage(GlobalConstant.COURSE_INFO_GET_FAIL);
                 logQueue.offer(log);
-                // FIX: 直接 return 会漏掉队列状态回写，任务永远停在「队列中(2)」
-                task.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
-                this.updateById(task);
+                // 直接 return 会漏掉队列状态回写，任务永远停在「队列中(2)」
+                markAbnormal(task.getId());
                 return;
             }
 
@@ -450,9 +570,8 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
             log.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
             log.setErrorMessage("系统异常");
             logQueue.offer(log);
-            // FIX: 同上，异常退出也要回写，否则任务卡在「队列中(2)」永远不动
-            task.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
-            this.updateById(task);
+            // 同上，异常退出也要回写，否则任务卡在「队列中(2)」永远不动
+            markAbnormal(task.getId());
         }
     }
 
@@ -480,12 +599,20 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                 }
             }
         }
-        if (pointIndex < 0 || pointIndex > chapterPointList.size()) {
+        if (pointIndex < 0 || pointIndex >= chapterPointList.size()) {
             pointIndex = 0;
         }
         if (pointIndex > 0) {
-            System.out.println("续刷课程: " + readyCourse.getTitle()
-                    + " 从第 " + (pointIndex + 1) + "/" + totalChapters + " 章接着刷");
+            int failedCount = parseIdSet(log.getFailedChapters()).size();
+            boolean hasVideoResume = log.getVideoPositionSeconds() != null
+                    && log.getVideoPositionSeconds() > 0;
+            if (pointIndex > 0 || failedCount > 0 || hasVideoResume) {
+                String videoResume = hasVideoResume
+                        ? "，视频续播点 " + log.getVideoPositionSeconds() + "s" : "";
+                System.out.println("续刷课程: " + readyCourse.getTitle()
+                        + " 从第 " + (pointIndex + 1) + "/" + totalChapters + " 章接着刷"
+                        + "，失败章节 " + failedCount + " 个" + videoResume);
+            }
         }
         // 本轮没通过服务端校验的章节 id（视频 isPassed 为 false、任务点抛异常等）
         Set<String> failedChapterIds = new LinkedHashSet<>();
@@ -536,44 +663,38 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                 List<Job> jobs = result.getFirst();
                 List<JobInfo> jobInfo = result.getSecond();
 
-                if (jobs.isEmpty()) {
+                // 先判断「章节未开放」：getJobList 对未开放章节返回空 jobs + notOpen 标记，
+                // 必须排在 jobs.isEmpty() 之前，否则永远走「无任务点」分支、不回滚也不报错。
+                if (jobInfo != null && !jobInfo.isEmpty()
+                        && Boolean.TRUE.equals(jobInfo.get(0).getNotOpen())) {
+                    pointIndex = Math.max(0, pointIndex - 1);
+                    try {
+                        rb.addTimes(chapterPoint.getId());
+                    } catch (Exception e) {
+                        log.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
+                        log.setErrorMessage("章节未开放（已达回滚上限）");
+                        log.setEndTime(LocalDateTime.now());
+                        logQueue.offer(log);
+                        markAbnormal(task.getId());
+                        return;
+                    }
+                    continue;
+                }
+
+                if (jobs == null || jobs.isEmpty()) {
                     pointIndex++;
                     continue;
                 }
 
-                if (jobs.stream().findFirst().map(job -> job instanceof Map && Boolean.TRUE.equals(((Map<?, ?>) job).get("notOpen"))).orElse(false)) {
-                    pointIndex--;
-                    rb.addTimes(chapterPoint.getId());
-                    continue;
-                }
-
                 boolean chapterOk = true;
-                // 「只刷视频」模式：命中 study.chaoxing.video-only-course-ids 的课程，
-                // 只处理 video，其余任务点（document / read / workid=做题 / hyperlink）一律跳过。
-                boolean videoOnly = studyProperties.getVideoOnlyCourseIds() != null
-                        && studyProperties.getVideoOnlyCourseIds().contains(readyCourse.getCourseId());
-                boolean skipTypesConfigured = studyProperties.getSkipJobTypes() != null
-                        && !studyProperties.getSkipJobTypes().isEmpty();
                 for (Job job : jobs) {
                     try {
 
-                        // 答题功能已移除（2026-10-15 用户要求）：做题 / 章节测验 / 作业
-                        // （type=workid）**无条件跳过**，不再有自动作答这条路径 ——
-                        // 不管 skip-job-types 里有没有写 workid、也不管课程是否配了 video-only。
+                        // 答题功能已移除：做题 / 章节测验 / 作业（type=workid）
+                        // 一律无条件跳过，不存在任何自动作答路径。
                         if (JobTypeConstant.QUESTION.equals(job.getType())) {
                             System.out.println(Thread.currentThread().getName()
                                     + "[skip]答题功能已移除，跳过[workid]: "
-                                    + readyCourse.getTitle() + " / " + job.getTitle());
-                            continue;
-                        }
-
-                        // 跳过规则：
-                        //   ① 全局 study.chaoxing.skip-job-types（如 workid = 做题/章节测验）
-                        //   ② 命中 video-only-course-ids 的课程只保留 video
-                        if ((skipTypesConfigured && studyProperties.getSkipJobTypes().contains(job.getType()))
-                                || (videoOnly && !JobTypeConstant.VIDEO.equals(job.getType()))) {
-                            System.out.println(Thread.currentThread().getName()
-                                    + "[skip]跳过任务点[" + job.getType() + "]: "
                                     + readyCourse.getTitle() + " / " + job.getTitle());
                             continue;
                         }
@@ -584,20 +705,20 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                                 boolean videoPassed = false;
                                 boolean threw = false;
                                 try {
-                                    videoPassed = courseUtil.studyVideo(readyCourse, job, jobInfo.get(0), studyProperties.getSpeed(), "Video", log);
+                                    videoPassed = courseUtil.studyVideo(readyCourse, job, jobInfo.get(0), "Video", log);
                                 } catch (Exception e) {
                                     threw = true;
                                 }
                                 // 只有「抛异常」才换音频通道重试（保持原行为，避免失败视频耗时翻倍）
                                 if (!videoPassed && threw) {
                                     try {
-                                        videoPassed = courseUtil.studyVideo(readyCourse, job, jobInfo.get(0), studyProperties.getSpeed(), "Audio", log);
+                                        videoPassed = courseUtil.studyVideo(readyCourse, job, jobInfo.get(0), "Audio", log);
                                     } catch (Exception e) {
                                         videoPassed = false;
                                     }
                                 }
-                                // FIX: 老实现不看返回值。studyVideo 现在返回服务端裁决（isPassed），
-                                // false 表示「上报被接受但超星没计分」，这种章节不能算刷完。
+                                // studyVideo 返回服务端裁决（isPassed），false 表示
+                                // 「上报被接受但超星没计分」，这种章节不能算刷完。
                                 if (!videoPassed) {
                                     chapterOk = false;
                                 }
@@ -666,11 +787,10 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                 log.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
                 log.setErrorMessage("章节处理异常");
                 logQueue.offer(log);
-                // FIX: break 出来时任务会一直停在「队列中(2)」不动
+                // break 出来时任务会一直停在「队列中(2)」不动
                 // （既不进 FINISHED 块，也没抛给上层 Runnable 的重试逻辑）。
                 // 显式标成异常，队列状态才跟事实一致。
-                task.setStatus(WkTaskStatusEnum.ABNORMAL.getCode());
-                this.updateById(task);
+                markAbnormal(task.getId());
                 break;
             }
         }
@@ -744,7 +864,7 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                 }
             }
             logQueue.offer(log);
-            this.updateById(task);
+            persistTaskStatus(task);
             return;
         }
 
@@ -770,7 +890,17 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
             }
         }
         logQueue.offer(log);
-        this.updateById(task);
+        persistTaskStatus(task);
+    }
+
+    /**
+     * 只更新队列状态，不整行覆盖 —— 避免把并发修改的重试次数、优先级等字段写回旧值。
+     */
+    private void persistTaskStatus(SuperStarTask task) {
+        LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
+        wrapper.eq(SuperStarTask::getId, task.getId())
+                .set(SuperStarTask::getStatus, task.getStatus());
+        this.update(null, wrapper);
     }
 
     /**

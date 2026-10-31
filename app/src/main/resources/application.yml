@@ -3,11 +3,21 @@ server:
   port: 3030
 
 spring:
-
-  profiles:
-    active: dev
+  application:
+    name: SuperAutoStudy
+  # 不再依赖被 .gitignore 排除的 application-dev.yml：仓库内配置即可启动。
+  # 本地单机运行不需要注册中心，关闭 Nacos 发现与配置，避免启动时连不上 8848。
+  cloud:
+    nacos:
+      discovery:
+        enabled: false
+      config:
+        enabled: false
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/tihai?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:SuperAuto2026}
     hikari:
       max-lifetime: 600000
 
@@ -33,3 +43,9 @@ super-star:
     User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
     Referer: "https://mooc1.chaoxing.com/ananas/modules/audio/index_new.html?v=2023-0428-1705"
     Host: "mooc1.chaoxing.com"
+
+dubbo:
+  registry:
+    address: N/A
+  application:
+    qos-enable: false

@@ -44,6 +44,11 @@ public class CourseSubmitTaskDTO {
     private String courseId;
 
     /**
+     * 优先级（1 最高，10 最低）。不传默认 1。
+     */
+    private Integer priority;
+
+    /**
      * 订单id
      */
     private String orderId;

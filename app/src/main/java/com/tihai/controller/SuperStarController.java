@@ -3,7 +3,9 @@ package com.tihai.controller;
 import com.tihai.common.R;
 import com.tihai.dubbo.dto.CourseSubmitTaskDTO;
 import com.tihai.enums.BizCodeEnum;
+import com.tihai.exception.BusinessException;
 import com.tihai.service.superstar.impl.SuperStarTaskServiceImpl;
+import lombok.extern.slf4j.Slf4j;
 import ma.glasnost.orika.MapperFacade;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
@@ -17,9 +19,10 @@ import javax.validation.Valid;
  * @Link : <a href="https://github.com/DuanInnovator/SuperAutotudy">...</a>
  **/
 @SuppressWarnings("all")
-@RestController
-@RequestMapping("/chaoxing")
-public class SuperStarController {
+    @RestController
+    @RequestMapping("/chaoxing")
+    @Slf4j
+    public class SuperStarController {
 
     @Autowired
     private SuperStarTaskServiceImpl chaoXingTaskService;
@@ -37,9 +40,13 @@ public class SuperStarController {
 
         try {
             chaoXingTaskService.addChaoXingTask(courseSubmitTaskDTO);
+        } catch (BusinessException e) {
+            return R.error(e.getCode(), e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return R.error(400, e.getMessage());
         } catch (Exception e) {
-
-            return R.error(BizCodeEnum.TASK_ALREADY_EXIST.getCode(), BizCodeEnum.TASK_ALREADY_EXIST.getMsg());
+            log.error("加入课程队列失败", e);
+            return R.error(500, "系统异常，请查看日志");
         }
         return R.ok();
     }

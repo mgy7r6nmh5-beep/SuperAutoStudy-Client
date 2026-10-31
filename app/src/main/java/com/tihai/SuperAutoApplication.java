@@ -41,7 +41,7 @@ public class SuperAutoApplication {
         String port = env.getProperty("server.port");
         String ip = InetAddress.getLocalHost().getHostAddress();
         String[] profiles = env.getActiveProfiles();
-        String speed = env.getProperty("study.chaoxing.speed");
+
 
         // ANSI 颜色定义
         String GREEN = "\033[1;32m";
@@ -55,13 +55,13 @@ public class SuperAutoApplication {
                         "  🔗  {}Local:      {}://localhost:{}\n" +
                         "  🌐  {}External:   {}://{}:{}\n" +
                         "  📦  {}Profile(s): {}\n" +
-                        "  📚  {}Study Speed: {}\n" +
+                        "  📚  {}Study Policy: {}\n" +
                         "---------------------------------------------------------------------------------------\n",
                 GREEN, appName, RESET,
                 CYAN, protocol, port,
                 CYAN, protocol, ip, port,
                 YELLOW, String.join(", ", profiles),
-                YELLOW, speed
+                YELLOW, com.tihai.constant.StudyPolicy.describe()
         );
     }
 

@@ -1,10 +1,3 @@
 {
-  "video_report_pace_ms": 60000,
-  "core_size": 3,
-  "video_max_rounds": 2,
-  "resume_video": false,
-  "skip_job_types": [],
-  "video_only_course_ids": [],
-  "keep_awake": true,
-  "update_mirror": ""
+  "keep_awake": true
 }

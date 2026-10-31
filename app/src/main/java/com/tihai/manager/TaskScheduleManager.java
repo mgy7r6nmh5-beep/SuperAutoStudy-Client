@@ -2,6 +2,7 @@ package com.tihai.manager;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.tihai.constant.StudyPolicy;
 import com.tihai.domain.chaoxing.SuperStarLog;
 import com.tihai.domain.chaoxing.SuperStarTask;
 import com.tihai.domain.chaoxing.WkUser;
@@ -53,6 +54,23 @@ public class TaskScheduleManager {
 
     private volatile boolean isNightMode = false;
 
+    /** 完成度复核的轮转游标：上一轮复核过的任务 id。 */
+    private volatile String lastVerifiedId = null;
+
+    private List<SuperStarTask> selectVerifyBatch(String afterId) {
+        LambdaQueryWrapper<SuperStarTask> wrapper = new LambdaQueryWrapper<>();
+        wrapper.in(SuperStarTask::getStatus,
+                        WkTaskStatusEnum.PENDING.getCode(),
+                        WkTaskStatusEnum.QUEUE.getCode(),
+                        WkTaskStatusEnum.ABNORMAL.getCode())
+                .orderByAsc(SuperStarTask::getId)
+                .last("LIMIT 1");
+        if (afterId != null) {
+            wrapper.gt(SuperStarTask::getId, afterId);
+        }
+        return superStarMapper.selectList(wrapper);
+    }
+
     private final ScheduledExecutorService scheduler =
             Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "self-heal-scheduler");
@@ -86,17 +104,20 @@ public class TaskScheduleManager {
             // 「未刷完：超星仍有 N 个待完成任务点」。这里不等线程，直接问超星课程页。
             verifyRealCompletion();
 
+            // 达到自动重试上限的课程不再自动入队，但必须让用户看见原因（P0-8）
+            markRetryLimitReached();
+
             LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
             wrapper.eq(SuperStarTask::getStatus, WkTaskStatusEnum.ABNORMAL.getCode())
                     // 加次数上限：否则一门永远刷不动的课会被每 5 分钟捞回来一次，
-                    // 永远空转。到 5 轮就停手，等用户手动「续刷 / 重试」重置额度。
-                    .apply("COALESCE(retry_count, 0) < 5")
+                    // 永远空转。到上限就停手，等用户手动「续刷 / 重试」重置额度。
+                    .apply("COALESCE(retry_count, 0) < {0}", StudyPolicy.MAX_AUTO_RETRY)
                     .set(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode())
                     .setSql("retry_count = COALESCE(retry_count, 0) + 1");
             int n = superStarMapper.update(null, wrapper);
-            if (n > 0) {
-                taskService.startChaoxingTask();
-            }
+            // 即使本轮没有捞回异常任务，也要尝试推进队列：
+            // 上一轮因需要重试而停在「待处理」的课程由这里承接。
+            taskService.startChaoxingTask();
         } catch (Exception ignore) {
             // 自愈失败不影响主流程；下一轮还会再试
         }
@@ -114,7 +135,7 @@ public class TaskScheduleManager {
      * 队列状态和日志就永远停在上一轮的结论上。实测：国家安全教育在作业补齐、
      * 超星 pending 已归零后，仍在「队列中」挂了 1 小时以上，用户看到「未刷完」。
      *
-     * <p><b>做法</b>：每轮自愈对「队列中(2) / 异常(5)」的课程直接拉超星课程页
+     * <p><b>做法</b>：每轮自愈对「待处理(0) / 队列中(2) / 异常(5)」的课程直接拉超星课程页
      * （{@link CourseUtil#getRealProgress}，只读，不动任何刷课状态）：
      * pending == 0 且解析到章节 → 直接判 FINISHED 并把日志行改写成「任务完成」。
      * 解析失败（拿到登录页等）返回 null，直接跳过，绝不误判。
@@ -124,14 +145,23 @@ public class TaskScheduleManager {
      */
     @SuppressWarnings("unchecked")
     private void verifyRealCompletion() {
-        List<SuperStarTask> rows = superStarMapper.selectList(
-                new LambdaQueryWrapper<SuperStarTask>()
-                        .in(SuperStarTask::getStatus,
-                                WkTaskStatusEnum.QUEUE.getCode(),
-                                WkTaskStatusEnum.ABNORMAL.getCode()));
+        // 轮转游标：每轮只复核 1 门，避免和单学习线程抢账号额度；
+        // 按 id 递增轮转，防止排在前面的长课程把后面的课程饿死（P0-6）。
+        List<SuperStarTask> rows;
+        if (lastVerifiedId == null) {
+            rows = selectVerifyBatch(null);
+        } else {
+            rows = selectVerifyBatch(lastVerifiedId);
+            if (rows == null || rows.isEmpty()) {
+                lastVerifiedId = null;
+                rows = selectVerifyBatch(null);
+            }
+        }
         if (rows == null || rows.isEmpty()) {
             return;
         }
+        lastVerifiedId = rows.get(0).getId();
+
         // 同一账号的多门课共用一份会话与课程列表，避免重复登录/重复拉列表
         Map<String, Object[]> sessions = new HashMap<>();
         for (SuperStarTask task : rows) {
@@ -219,12 +249,47 @@ public class TaskScheduleManager {
         }
     }
 
+/**
+     * 达到自动重试上限的课程不再自动入队，但要把原因写进日志（P0-8），
+     * 让用户知道为什么停了、下一步该点「续刷 / 重试」。
+     */
+    private void markRetryLimitReached() {
+        String limitMsg = "已达自动重试上限（" + StudyPolicy.MAX_AUTO_RETRY
+                + " 轮），可点「续刷 / 重试」恢复";
+        List<SuperStarTask> rows = superStarMapper.selectList(
+                new LambdaQueryWrapper<SuperStarTask>()
+                        .eq(SuperStarTask::getStatus, WkTaskStatusEnum.ABNORMAL.getCode())
+                        .apply("COALESCE(retry_count, 0) >= {0}", StudyPolicy.MAX_AUTO_RETRY));
+        if (rows == null) {
+            return;
+        }
+        for (SuperStarTask task : rows) {
+            try {
+                SuperStarLog log = logService.getLatestLogByLoginAccount(
+                        task.getLoginAccount(), task.getCourseName());
+                if (log == null || log.getId() == null) {
+                    continue;
+                }
+                String old = log.getErrorMessage();
+                if (old != null && old.contains("已达自动重试上限")) {
+                    continue;
+                }
+                String msg = (old == null || old.trim().isEmpty()) ? limitMsg : old + "；" + limitMsg;
+                LambdaUpdateWrapper<SuperStarLog> wrapper = new LambdaUpdateWrapper<>();
+                wrapper.eq(SuperStarLog::getId, log.getId())
+                        .set(SuperStarLog::getErrorMessage, msg);
+                logService.update(null, wrapper);
+            } catch (Exception ignore) {
+                // 单门课写失败不影响其它课程
+            }
+        }
+    }
+
 //    @PostConstruct
 //    public void init() throws NacosException {
 //        checkTimeAndAdjust();
 //    }
 
-    // 每分钟检查一次时间
 //    @Scheduled(cron = "0 * * * * ?")
 //    public void checkTimeAndAdjust() throws NacosException {
 //        LocalTime now = LocalTime.now();

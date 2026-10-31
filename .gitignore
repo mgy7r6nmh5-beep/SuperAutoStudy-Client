@@ -58,6 +58,7 @@ console-shot.png
 
 # ---------- 工具 / IDE ----------
 .workbuddy-ai/
+.arts/
 .idea/
 .vscode/
 *.iml

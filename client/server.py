@@ -87,19 +87,10 @@ STATUS_TEXT = {0: "待处理", 1: "进行中", 2: "队列中", 3: "已废弃",
                4: "已完成", 5: "异常", 6: "暂停"}
 
 DEFAULT_SETTINGS = {
-    "video_report_pace_ms": 60000,
-    "core_size": 3,
-    "video_max_rounds": 2,
-    # 视频断点续播：从中断处接着上报。中途起报可能被判跳播，所以默认关。
-    "resume_video": False,
-    # 做题 / 章节测验（workid）已从工具中移除，后端无条件跳过，不再需要跳过规则
-    "skip_job_types": [],
-    "video_only_course_ids": [],
+    # 面向用户的设置只剩「运行时防止电脑休眠」。
+    # 刷课节奏、线程数、播放遍数、断点续刷等全部由后端固定策略决定，
+    # 旧 settings.json 里的废弃键在读取/保存时一律丢弃。
     "keep_awake": True,
-    # 更新下载镜像。官方 GitHub 优先，只有它失败或者慢到离谱才会走镜像。
-    # 留空 = 用 updater.py 里内置的镜像列表；填 "-" = 只用官方，一个镜像都不碰。
-    # 填前缀或带 {url} 的模板都行，多个用逗号隔开。
-    "update_mirror": "",
 }
 
 # ------------------------------------------------------------------ 防休眠
@@ -444,56 +435,23 @@ class Settings:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            if isinstance(saved, dict):
-                self.data.update(saved)
         except Exception:
-            pass
+            return self.data
+        if isinstance(saved, dict):
+            keep = saved.get("keep_awake", DEFAULT_SETTINGS["keep_awake"])
+            self.data["keep_awake"] = keep if isinstance(keep, bool) else DEFAULT_SETTINGS["keep_awake"]
         return self.data
 
     def save(self, patch):
-        for k in DEFAULT_SETTINGS:
-            if k in patch:
-                self.data[k] = patch[k]
-        # 归一化
-        try:
-            self.data["video_report_pace_ms"] = max(3000, int(self.data["video_report_pace_ms"]))
-            self.data["core_size"] = max(1, min(10, int(self.data["core_size"])))
-            self.data["video_max_rounds"] = max(1, min(5, int(self.data["video_max_rounds"])))
-            # workid（做题/章节测验）已从工具中移除：后端无条件跳过，
-            # 老 settings.json 里残留的 workid 在这里顺手清掉，界面上不再出现。
-            self.data["skip_job_types"] = [str(x) for x in self.data["skip_job_types"]
-                                           if str(x).strip() and str(x).strip() != "workid"]
-            self.data["video_only_course_ids"] = [str(x) for x in self.data["video_only_course_ids"] if str(x).strip()]
-            if not isinstance(self.data.get("keep_awake"), bool):
-                self.data["keep_awake"] = bool(self.data.get("keep_awake"))
-            if not isinstance(self.data.get("resume_video"), bool):
-                self.data["resume_video"] = bool(self.data.get("resume_video"))
-            self.data["update_mirror"] = str(self.data.get("update_mirror") or "").strip()
-        except Exception:
-            pass
+        """只接受 keep_awake；未知键与旧版刷课参数一律丢弃。"""
+        if isinstance(patch, dict) and isinstance(patch.get("keep_awake"), bool):
+            self.data["keep_awake"] = patch["keep_awake"]
+        self.data = {"keep_awake": bool(self.data.get("keep_awake", True))}
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self.path)
         return self.data
-
-    def backend_args(self):
-        """把设置翻译成 Spring Boot 命令行覆盖参数（jar 内的 yml 不改）。
-
-        列表用「逗号分隔的单值」而不是 `key[0]=a&key[1]=b`：
-        下标写法只能覆盖前 N 项，yml 里多出来的项会残留 —— 用户在界面上
-        **清空**列表时，yml 的值又冒出来，看起来像没生效。逗号写法是整值替换，
-        空列表就传空串（Spring 会把 "" 绑成空集合），语义干净。
-        """
-        d = self.data
-        return [
-            "--study.chaoxing.video-report-pace-ms={}".format(d["video_report_pace_ms"]),
-            "--custom.thread-pool.core-size={}".format(d["core_size"]),
-            "--study.chaoxing.video-max-rounds={}".format(d["video_max_rounds"]),
-            "--study.chaoxing.skip-job-types={}".format(",".join(d["skip_job_types"])),
-            "--study.chaoxing.video-only-course-ids={}".format(",".join(d["video_only_course_ids"])),
-            "--study.chaoxing.resume-video={}".format("true" if d.get("resume_video") else "false"),
-        ]
 
 
 SETTINGS = Settings(SETTINGS_PATH)
@@ -615,7 +573,7 @@ class Services:
             return "err", "找不到 {}".format(self.java)
         args = [self.java, "-Dfile.encoding=UTF-8", "-jar", jar,
                 "--server.port={}".format(HTTP_PORT)]
-        args.extend(SETTINGS.backend_args())
+
         try:
             self._app_fh = open(self.livelog, "ab", buffering=0)
             self.app_proc = subprocess.Popen(
@@ -672,19 +630,21 @@ class Services:
 SELECT q.id, q.course_id, q.course_name, q.status, q.priority, q.retry_count,
        q.creat_time,
        l.current_chapter_index, l.current_progress, l.status AS lstatus,
-       l.current_job, l.error_message, l.remark, l.start_time, l.end_time
+       l.current_job, l.error_message, l.remark, l.start_time, l.end_time,
+       l.chapter_id, l.failed_chapters, l.video_position_seconds
 FROM th_wk_queue q
 LEFT JOIN (
     SELECT t.login_account, t.course_name, t.current_chapter_index,
            t.current_progress, t.status, t.current_job,
-           t.error_message, t.remark, t.start_time, t.end_time
+           t.error_message, t.remark, t.start_time, t.end_time,
+           t.chapter_id, t.failed_chapters, t.video_position_seconds
     FROM th_wk_log t
     JOIN (SELECT login_account, course_name, MAX(id) AS mid
           FROM th_wk_log GROUP BY login_account, course_name) m
       ON t.login_account = m.login_account
      AND t.course_name  = m.course_name
      AND t.id           = m.mid
-) l ON l.course_name = q.course_name
+) l ON l.login_account = q.login_account AND l.course_name = q.course_name
 ORDER BY q.creat_time
 """
 
@@ -726,6 +686,12 @@ SELECT account, CHAR_LENGTH(COALESCE(cookies, '')) AS cookie_len
         ("th_wk_log", "failed_chapters",
          "ALTER TABLE th_wk_log ADD COLUMN failed_chapters varchar(1024) NULL DEFAULT NULL "
          "COMMENT '本轮未通过校验的章节id，逗号分隔' AFTER chapter_id"),
+        ("th_wk_log", "video_position_seconds",
+         "ALTER TABLE th_wk_log ADD COLUMN video_position_seconds int(11) NULL DEFAULT NULL "
+         "COMMENT '本地上次成功上报的视频位置（秒）' AFTER failed_chapters"),
+        ("th_wk_log", "video_position_job_id",
+         "ALTER TABLE th_wk_log ADD COLUMN video_position_job_id varchar(64) NULL DEFAULT NULL "
+         "COMMENT '位置所属任务点 jobId' AFTER video_position_seconds"),
     ]
 
     def ensure_schema(self):
@@ -774,17 +740,25 @@ SELECT account, CHAR_LENGTH(COALESCE(cookies, '')) AS cookie_len
             with conn.cursor() as cur:
                 n = cur.execute("DELETE FROM th_wk_queue WHERE id = %s", (queue_id,))
             conn.commit()
+            print("[操作] 移除课程 {} -> {}".format(queue_id, "已移除" if n else "不存在"))
             return n
         finally:
             conn.close()
 
     def set_priority(self, queue_id, priority):
+        try:
+            p = int(priority)
+        except (TypeError, ValueError):
+            raise ValueError("优先级必须是 1~10 的整数")
+        if p < 1 or p > 10:
+            raise ValueError("优先级要在 1~10 之间")
         conn = self.connect()
         try:
             with conn.cursor() as cur:
                 n = cur.execute("UPDATE th_wk_queue SET priority = %s WHERE id = %s",
-                                (int(priority), queue_id))
+                                (p, queue_id))
             conn.commit()
+            print("[操作] 调整优先级 {} -> {}（下一次排队生效）".format(queue_id, p))
             return n
         finally:
             conn.close()
@@ -808,10 +782,12 @@ SELECT account, CHAR_LENGTH(COALESCE(cookies, '')) AS cookie_len
                 cur.execute(
                     "SELECT q.id, q.status, q.creat_time, l.lstatus, l.start_time, l.end_time "
                     "  FROM th_wk_queue q LEFT JOIN ("
-                    "      SELECT t.course_name, t.status AS lstatus, t.start_time, t.end_time "
-                    "        FROM th_wk_log t JOIN (SELECT course_name, MAX(id) AS mid "
-                    "                FROM th_wk_log GROUP BY course_name) m ON t.id = m.mid"
-                    "  ) l ON l.course_name = q.course_name WHERE q.status IN (2, 5)")
+                    "      SELECT t.login_account, t.course_name, t.status AS lstatus, "
+                    "             t.start_time, t.end_time "
+                    "        FROM th_wk_log t JOIN (SELECT login_account, course_name, MAX(id) AS mid "
+                    "                FROM th_wk_log GROUP BY login_account, course_name) m ON t.id = m.mid"
+                    "  ) l ON l.login_account = q.login_account AND l.course_name = q.course_name "
+                    " WHERE q.status IN (2, 5)")
                 rows = cur.fetchall()
                 finished, stuck, failed = [], [], []
                 for row_id, qstatus, creat_time, lstatus, start_time, end_time in rows:
@@ -869,7 +845,7 @@ class LiveTracker:
 
     START_RE = re.compile(
         r"(priority-pool-\d+)开始学习视频: 课程名:(.*?) 任务名:(.*?) 时长:(\d+)s"
-        r"(?: 上报步长:\d+s 墙钟间隔:\d+ms)?(?: 起始:(\d+))?")
+        r"(?: 上报步长:\d+s 墙钟间隔:\d+ms| 真实节奏 步长:\d+s)?(?: 起始:(\d+))?")
     DONE_RE = re.compile(r"(priority-pool-\d+)(视频已计分|视频未计分|视频被超星风控拦截): (.*?)[（(]")
     POS_RE = re.compile(
         r"(priority-pool-\d+)播放位置: (.*?) (\d+)s/(\d+)s (?:第)?(\d+)遍 第(\d+)报")
@@ -930,26 +906,22 @@ class LiveTracker:
 
     def snapshot(self):
         now = time.time()
-        # 上报节流是全局的：任意两次上报间隔 >= paceMs，N 个线程排队 → 每条
-        # 视频的真实播放位置只以 1/N 的速度前进。拿不到精确位置时按此折算。
-        try:
-            n_threads = max(1, int(SETTINGS.data.get("core_size", 1) or 1))
-        except (TypeError, ValueError):
-            n_threads = 1
+
         out = []
         for v in self.active.values():
             # 某个池不再产日志时（后端重启、线程崩了、课程跑完被回收），条目
             # 会永远留在 active 里 —— 表现为一张永不消失的「正在播放」幽灵卡片
             # （曾见 priority-pool-3 elapsed=50200s）。这里按最后一次见到该线程
-            # 日志的时间过期：正常每 core_size×paceMs 秒必有上报，留 5 分钟足够，
-            # 远大于最慢的 10×60s，不会误杀真正在跑的池。
+            # 日志的时间过期：单课串行下每 step 秒必有上报，留 5 分钟足够，
+            # 不会误杀真正在跑的线程。
             if now - v.get("last_seen", v.get("started", now)) > 300:
                 continue
             dur = v["duration"] or 0
             elapsed = max(0.0, now - v["started"])
             pos = v.get("position")
             if pos is None:
-                pos = int(elapsed / n_threads)
+                # 单课串行 + 真实节奏：播放位置就按 1 秒/秒 推进
+                pos = int(elapsed)
             if dur:
                 pct = min(100.0, pos * 100.0 / dur)
             else:
@@ -960,10 +932,6 @@ class LiveTracker:
                 "position": pos,
                 "round": v.get("round", 1),
                 "percent": round(pct, 1),
-                # 供界面解释「已进行 ≈ 位置 × N」：N 个刷课线程共享同一个
-                # 上报间隔（超星风控按账号，多线程必须排队），每条视频的
-                # 播放位置只以 1/N 速度推进，总吞吐不变。
-                "divisor": n_threads,
             })
         out.sort(key=lambda x: x["thread"])
         return out
@@ -1021,6 +989,8 @@ def status_of(lstatus, qstatus, errmsg, lstart, backend_started):
         return "run", "排队中"
     if errmsg and "未登录" in errmsg:
         return "err", "未登录"
+    if errmsg and "已达自动重试上限" in errmsg:
+        return "err", "已达上限"
     if errmsg and "未刷完" in errmsg:
         return "err", "未刷完"
     if lstatus == 4:
@@ -1074,12 +1044,13 @@ def build_state():
                 backend_started = proc_start_time(pid_on_port(HTTP_PORT))
             for (qid, course_id, course_name, qstatus, priority, retry,
                  creat_time, chap, prog, lstatus, cur_job, errmsg, remark,
-                 lstart, lend) in rows:
+                 lstart, lend, chap_id, failed_chapters, video_pos) in rows:
                 tag, text = status_of(lstatus, qstatus, errmsg, lstart, backend_started)
                 try:
                     pct = float(prog) if prog is not None else 0.0
                 except (TypeError, ValueError):
                     pct = 0.0
+                failed_list = [x for x in str(failed_chapters or "").split(",") if x.strip()]
                 state["queue"].append({
                     "id": str(qid),
                     "courseId": course_id,
@@ -1090,6 +1061,10 @@ def build_state():
                     "priority": priority,
                     "retry": retry or 0,
                     "chapter": chap,
+                    "chapterId": chap_id,
+                    "failedChapterCount": len(failed_list),
+                    "resumeVideoSeconds": video_pos,
+                    "retryLimitReached": (qstatus == 5 and (retry or 0) >= 5),
                     "progress": round(max(0.0, min(100.0, pct)), 1),
                     "currentJob": cur_job,
                     "remark": remark,
@@ -1117,6 +1092,11 @@ def build_state():
         TRACKER.feed(fresh)
     state["live"] = TRACKER.snapshot()
     state["recentVideos"] = TRACKER.recent[-12:]
+
+    # 后端停了就没有「正在刷的视频」；立即清空，避免幽灵卡片
+    if not app_up:
+        TRACKER.active.clear()
+        state["live"] = []
 
     # OTA 自更新状态（当前版本 / 是否有新版本 / 更新进度）
     state["update"] = update_public_state()
@@ -1346,6 +1326,7 @@ class Handler(BaseHTTPRequestHandler):
                     parts.append("已重新入队")
                 except Exception:
                     pass
+            print("[操作] 续刷 / 重试 -> {}".format("，".join(parts)))
             return self._json({"ok": True, "messages": parts})
 
         if p == "/api/login":
@@ -1380,7 +1361,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": r.get("msg") or "加课失败"})
 
         if p == "/api/settings":
-            return self._json({"ok": True, "settings": SETTINGS.save(body)})
+            saved = SETTINGS.save(body)
+            print("[操作] 保存设置 -> {}".format(saved))
+            return self._json({"ok": True, "settings": saved})
 
         if p == "/api/update/apply":
             if UPDATER is None:
@@ -1417,10 +1400,13 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/course/(.+)$", p)
         if m:
             qid = m.group(1)
-            if "priority" in body:
-                SVC.set_priority(qid, body["priority"])
-            if "status" in body:
-                SVC.set_status(qid, body["status"])
+            try:
+                if "priority" in body:
+                    SVC.set_priority(qid, body["priority"])
+                if "status" in body:
+                    SVC.set_status(qid, body["status"])
+            except ValueError as exc:
+                return self._json({"ok": False, "error": str(exc)})
             return self._json({"ok": True})
         return self._json({"ok": False, "error": "not found"}, 404)
 

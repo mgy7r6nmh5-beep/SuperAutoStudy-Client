@@ -1,6 +1,7 @@
 package com.tihai.manager;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.tihai.constant.StudyPolicy;
 import com.tihai.domain.chaoxing.SuperStarTask;
 import com.tihai.enums.WkTaskStatusEnum;
 import com.tihai.mapper.SuperStarMapper;
@@ -90,8 +91,10 @@ public class StuckTaskRecover implements ApplicationListener<ApplicationReadyEve
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         return jdbc.update(
                 "UPDATE th_wk_queue q "
-                        + "  JOIN (SELECT course_name, MAX(id) AS mid FROM th_wk_log GROUP BY course_name) m "
-                        + "    ON m.course_name = q.course_name "
+                        + "  JOIN (SELECT login_account, course_name, MAX(id) AS mid FROM th_wk_log "
+                        + "        GROUP BY login_account, course_name) m "
+                        + "    ON m.login_account = q.login_account "
+                        + "   AND m.course_name = q.course_name "
                         + "  JOIN th_wk_log l ON l.id = m.mid "
                         + "   SET q.status = ? "
                         + " WHERE q.status IN (?, ?, ?, ?) AND l.status = ?",
@@ -129,7 +132,7 @@ public class StuckTaskRecover implements ApplicationListener<ApplicationReadyEve
     private int retryAbnormal() {
         LambdaUpdateWrapper<SuperStarTask> wrapper = new LambdaUpdateWrapper<>();
         wrapper.eq(SuperStarTask::getStatus, WkTaskStatusEnum.ABNORMAL.getCode())
-                .apply("COALESCE(retry_count, 0) < 5")
+                .apply("COALESCE(retry_count, 0) < {0}", StudyPolicy.MAX_AUTO_RETRY)
                 .set(SuperStarTask::getStatus, WkTaskStatusEnum.PENDING.getCode())
                 .setSql("retry_count = COALESCE(retry_count, 0) + 1");
         return superStarMapper.update(null, wrapper);
