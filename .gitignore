@@ -24,6 +24,8 @@ dist-portable/
 *.jar
 *.class
 *.exe
+# 打安装包时从 dist-portable 拷过来的临时树（350 MB），打完就删
+installer/SuperAutoStudy/
 
 # ---------- Python 字节码 ----------
 # ⚠️ 显式排除，别依赖 `_*` 的巧合匹配：.pyc 的 co_filename 内嵌编译时的

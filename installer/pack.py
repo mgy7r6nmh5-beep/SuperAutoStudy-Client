@@ -22,6 +22,14 @@ STORED_EXT = {".jar", ".zip", ".png", ".jpg", ".jpeg", ".gz", ".7z", ".mp4", ".x
 SKIP_REL = {
     "app/ai-config.json",
     "client/settings.json",
+    # 日志和临时文件不该进发布包：boot.log 里有账号、课程名这些
+    "app/boot.log",
+    "app/live.log",
+    "app/app.log",
+    "my.ini",
+    "mysql57/console.log",
+    "mysql57/console.log.old",
+    "mysql57/mysql-error.log",
 }
 SKIP_DIRS = {
     "app/quiz-dump",

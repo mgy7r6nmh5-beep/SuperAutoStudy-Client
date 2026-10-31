@@ -62,7 +62,7 @@ const S = {
   logAutoScroll: true,
   enroll: { courses: null, picked: new Set(), loading: false },
   points: {},          // courseId -> {loading, data, error, at}
-  // 待确认测验：items 为后端原始行，answers 缓存用户在界面上的改动
+  // 答题模块：items 为后端原始行，answers 缓存用户在界面上的改动
   // （pid -> {qid: answer}），不直接写回 items，免得重绘把用户输入冲掉。
   quiz: { items: null, loading: false, error: '', answers: {}, ai: null, submitting: {},
           recent: null, recentLoading: false },
@@ -114,7 +114,7 @@ function renderTopbar(d) {
     </span>`).join('');
 }
 
-/* 待确认小红点：轮询里更新，不随视图重绘，用户切到别的页也能看到还有几份没处理 */
+/* 答题小红点：轮询里更新，不随视图重绘，用户切到别的页也能看到还有几份没处理 */
 function renderQuizBadge(d) {
   const el = $('#quiz-badge');
   if (!el) return;
@@ -488,8 +488,8 @@ function viewSettings(d) {
   </div>`;
 }
 
-/* ---------------- 待确认测验 ---------------- */
-// 刷课线程抓到章节测验就落一条待确认记录（status=1），抓崩了落 status=5。
+/* ---------------- 答题模块 ---------------- */
+// 刷课线程抓到章节测验就落一条待答题记录（status=1），抓崩了落 status=5。
 // 这里只负责「让人看一眼再交」—— 一次提交就定分，没有后悔药，
 // 所以界面上刻意没有「全部自动提交」这种东西。
 const QZ_TYPE_NAME = { single: '单选', multiple: '多选', judge: '判断', fill: '填空', short: '简答' };
@@ -512,7 +512,7 @@ async function loadQuiz() {
       S.quiz.items = r.data;
     } else {
       S.quiz.items = [];
-      S.quiz.error = (r && (r.error || r.msg)) || '读取待确认列表失败';
+      S.quiz.error = (r && (r.error || r.msg)) || '读取答题列表失败';
     }
   } catch (e) {
     S.quiz.items = [];
@@ -576,7 +576,7 @@ function viewQuiz(d) {
   const st = S.quiz;
 
   if (st.loading && st.items === null) {
-    return `<div class="view-inner"><div class="panel"><div class="empty">正在读取待确认的测验…</div></div></div>`;
+    return `<div class="view-inner"><div class="panel"><div class="empty">正在读取答题记录…</div></div></div>`;
   }
   if (st.error) {
     return `<div class="view-inner"><div class="panel"><div class="empty">
@@ -591,7 +591,7 @@ function viewQuiz(d) {
     // 下面的「最近提交 · 得分」就整个不渲染了 —— 恰恰是最想看分的时候没得看。
     return `<div class="view-inner"><div class="panel">
       <div class="panel-head">
-        <span class="panel-title">待确认的章节测验</span>
+        <span class="panel-title">章节测验 · 答题</span>
         <button class="btn btn-ghost btn-sm" data-act="quiz-reload">刷新</button>
       </div>
       <div class="empty">
@@ -618,7 +618,7 @@ function viewQuiz(d) {
     ${warn}
     <div class="panel">
       <div class="panel-head">
-        <span class="panel-title">待确认的章节测验 · ${items.length} 份</span>
+        <span class="panel-title">章节测验 · 答题 · ${items.length} 份</span>
         <span class="row" style="gap:var(--s2)">
           <span class="faint" style="font-size:var(--t-xs)">AI 只给建议，交之前请自己看一遍</span>
           <button class="btn btn-ghost btn-sm" data-act="quiz-reload">刷新</button>
@@ -690,7 +690,7 @@ function viewQuizPaper(p) {
 
   const tags = [broken
     ? '<span class="tag tag-err">抓题失败</span>'
-    : '<span class="tag tag-accent">待确认</span>'];
+    : '<span class="tag tag-accent">待答题</span>'];
   if (manual) tags.push(`<span class="tag tag-err">${manual} 题需人工</span>`);
 
   const body = qs.length
@@ -893,11 +893,11 @@ async function doQuizSkip(pid) {
 // 策略说明。键必须和后端 QuizMode 的取值一致 —— 这边只负责写进
 // app/ai-config.json，真正执行的是 Java 那边。
 const QUIZ_MODE_DESC = {
-  confirm: '抓到题、AI 出完答案就挂到「待确认」，你逐题看过再点提交。最稳，但得有人盯着。',
-  auto_high: '每道题都过了校验、且 AI 自评全是 high 才自动交；只要有一道没把握，整份退回「待确认」。',
+  confirm: '抓到题、AI 出完答案就挂到「答题」，你逐题看过再点提交。最稳，但得有人盯着。',
+  auto_high: '每道题都过了校验、且 AI 自评全是 high 才自动交；只要有一道没把握，整份退回「答题」。',
   auto_medium: '门槛放宽到 medium，那些「大概率对」的也一起交掉。可能有个别错题，但不用天天盯着。',
   auto_any: '只要能答出来就交，包含 AI 自评 low 的题。完全不想管的时候用，错了不负责。',
-  off: '遇到章节测验直接跳过，和 v1.0.8 之前一样。「待确认」页会一直是空的。',
+  off: '遇到章节测验直接跳过，和 v1.0.8 之前一样。「答题」页会一直是空的。',
 };
 
 function renderQuizModeDesc() {
@@ -1486,7 +1486,7 @@ document.addEventListener('click', async (e) => {
   if (act === 'update-check') return doUpdateCheck();
   if (act === 'update-apply') return doUpdateApply(el.dataset.mode);
 
-  // ---- 待确认测验
+  // ---- 答题模块
   if (act === 'qz-pick') {
     const pid = el.dataset.pid, qid = el.dataset.qid;
     const q = quizQ(pid, qid);
