@@ -174,7 +174,8 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                 return;
             }
 
-            BlockingQueue<Runnable> queue = new PriorityBlockingQueue<>(config.getQueueCapacity());
+            BlockingQueue<Runnable> queue = new PriorityBlockingQueue<>(
+                    config.getQueueCapacity(), PriorityTaskWrapper.PRIORITY_ORDER);
 
             // 重新构建线程池：学习线程数永远固定为 1
             taskExecutor = new ThreadPoolExecutor(

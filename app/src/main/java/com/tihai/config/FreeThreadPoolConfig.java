@@ -4,6 +4,7 @@ import com.tihai.constant.StudyPolicy;
 import com.tihai.factory.CustomThreadFactory;
 import com.tihai.factory.PriorityRejectPolicy;
 import com.tihai.properties.ThreadPoolProperties;
+import com.tihai.queue.PriorityTaskWrapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -31,8 +32,11 @@ public class FreeThreadPoolConfig {
         // 单课串行是硬约束：核心 / 最大线程都固定为 1，不接受外部覆盖。
         int threads = StudyPolicy.LEARNING_THREADS;
         log.info("当前学习线程数固定为:{}", threads);
-        // 创建优先级阻塞队列
-        BlockingQueue<Runnable> queue = new PriorityBlockingQueue<>(config.getQueueCapacity());
+        // 创建优先级阻塞队列。Comparator 必须给：队列里会混进非 PriorityTaskWrapper
+        // 的裸 Runnable（scheduleNext 的 lambda），没 Comparator 时插入非空队列会抛
+        // ClassCastException，把 worker 线程直接打死。
+        BlockingQueue<Runnable> queue = new PriorityBlockingQueue<>(
+                config.getQueueCapacity(), PriorityTaskWrapper.PRIORITY_ORDER);
 
         // 构建线程池
         ThreadPoolExecutor executor = new ThreadPoolExecutor(
