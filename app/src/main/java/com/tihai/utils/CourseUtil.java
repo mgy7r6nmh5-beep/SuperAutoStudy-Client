@@ -1357,4 +1357,205 @@ public class CourseUtil {
         }
         superStarLogService.saveLog(log);
     }
+
+    // ========================================================================
+    // 章节测验：抓题
+    // ========================================================================
+
+    /**
+     * 抓一份章节测验的题目。
+     *
+     * <p>入口是 {@code /mooc-ans/api/work?api=1&...}。有两个坑，都是 2026-10
+     * 实测出来的：
+     *
+     * <p><b>坑一：必须带 ktoken。</b> 不带直接 403（不是 3004 那种提示页，是
+     * 干净的 HTTP 403）。ktoken 是章节级的，在章节页 {@code mArg.defaults.ktoken}
+     * 里，{@link Decode#decodeCourseCard} 已经解析到 {@link JobInfo#getKtoken()}。
+     *
+     * <p><b>坑二：必须先有课程上下文。</b> 直接请求题目页会拿到
+     * 「您长时间没有操作，或没有此页面访问权限 [3003]」。所以要先 GET 一次
+     * {@code /visit/stucoursemiddle}，让服务端把课程上下文写进会话。
+     *
+     * <p>抓不到题（返回提示页）时会把原始 HTML 落到 {@code quiz-dump/} 下，
+     * 方便事后对着真实页面修选择器，而不是只看到一句「题目数 0」。
+     *
+     * @return 解析好的卷子；{@code size() == 0} 表示没抓到题，调用方别提交
+     */
+    public QuizPaper fetchQuizPaper(Course course, Job job, JobInfo jobInfo) throws IOException {
+        OkHttpClient client = initSession(false, false);
+
+        String knowledgeId = jobInfo.getKnowledgeid();
+        String cpi = jobInfo.getCpi();
+        if (knowledgeId == null || knowledgeId.isEmpty()) {
+            // 有的章节 jobInfo 不带，从 otherInfo 的 nodeId_xxx-cpi_yyy 里抠
+            Matcher m = Pattern.compile("nodeId_(.*?)-").matcher(
+                    job.getOtherInfo() == null ? "" : job.getOtherInfo());
+            if (m.find()) {
+                knowledgeId = m.group(1);
+            }
+        }
+        if (cpi == null || cpi.isEmpty()) {
+            Matcher m = Pattern.compile("cpi_(\\d+)").matcher(
+                    job.getOtherInfo() == null ? "" : job.getOtherInfo());
+            if (m.find()) {
+                cpi = m.group(1);
+            }
+        }
+
+        String workId = job.getJobId() == null ? "" : job.getJobId().replace("work-", "");
+
+        // 先建立课程上下文，否则下面必然 3003
+        String middle = String.format(
+                "https://mooc1.chaoxing.com/visit/stucoursemiddle?courseid=%s&clazzid=%s&vc=1&cpi=%s",
+                course.getCourseId(), course.getClazzId(), cpi);
+        try (Response ignored = client.newCall(new Request.Builder().url(middle).build()).execute()) {
+            // 只为了拿 Set-Cookie，响应体不用
+        }
+
+        String url = String.format(
+                "https://mooc1.chaoxing.com/mooc-ans/api/work?api=1&workId=%s&jobid=%s"
+                        + "&originJobId=%s&needRedirect=true&skipHeader=true&knowledgeid=%s"
+                        + "&ktoken=%s&cpi=%s&ut=s&clazzId=%s&enc=%s&mooc2=1&courseid=%s",
+                workId, job.getJobId(), job.getJobId(), knowledgeId,
+                jobInfo.getKtoken() == null ? "" : jobInfo.getKtoken(),
+                cpi, course.getClazzId(),
+                job.getEnc() == null ? "" : job.getEnc(),
+                course.getCourseId());
+
+        String html = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            if (attempt >= 2) {
+                // 占位页是按副本随机出现的，重试必须换连接
+                client.connectionPool().evictAll();
+            }
+            Request req = (attempt == 1)
+                    ? new Request.Builder().url(url).build()
+                    : new Request.Builder().url(url).header("Connection", "close").build();
+            try (Response resp = client.newCall(req).execute()) {
+                String body = resp.body() == null ? "" : resp.body().string();
+                if (resp.isSuccessful() && body.contains("singleQuesId")) {
+                    html = body;
+                    break;
+                }
+                // 最后一次都没拿到就把最后那份存下来，便于排查
+                html = body;
+            }
+            try {
+                Thread.sleep(800);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+
+        QuizPaper paper = Decode.decodeQuizPaper(html == null ? "" : html);
+        paper.setCourseId(course.getCourseId());
+        paper.setCourseName(course.getTitle());
+        paper.setClazzId(course.getClazzId());
+        paper.setCpi(cpi);
+        paper.setKnowledgeId(knowledgeId);
+        paper.setJobId(job.getJobId());
+        paper.setWorkId(workId);
+        paper.setTitle(job.getTitle());
+
+        if (paper.size() == 0) {
+            dumpQuizHtml(workId, html);
+        }
+        return paper;
+    }
+
+    /** 抓不到题时把原始 HTML 存下来。存不成功不影响主流程。 */
+    private void dumpQuizHtml(String workId, String html) {        try {
+            java.io.File dir = new java.io.File("quiz-dump");
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                return;
+            }
+            java.io.File out = new java.io.File(dir, "work-" + workId + ".html");
+            try (java.io.Writer w = new java.io.OutputStreamWriter(
+                    new java.io.FileOutputStream(out), java.nio.charset.StandardCharsets.UTF_8)) {
+                w.write(html == null ? "" : html);
+            }
+            System.out.println(Thread.currentThread().getName()
+                    + "[quiz] 没解析出题目，原始页已存到 " + out.getAbsolutePath());
+        } catch (Exception e) {
+            System.out.println(Thread.currentThread().getName()
+                    + "[quiz] 保存原始页失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 提交一份章节测验。
+     *
+     * <p>提交地址不能硬编码。页面 {@code <form action="addStudentWorkNewWeb?...">}
+     * 里带着本次会话的 {@code token}、{@code enc_work}、{@code workAnswerId}、
+     * {@code totalQuestionNum} —— 少一个服务端就拒，而且这些值每次都变。
+     * 旧实现写死成 {@code /mooc-ans/work/addStudentWorkNewWeb}，按现在的超星
+     * 是必然失败的。
+     *
+     * <p>表单字段也要原样带上：抓题时存下来的 19 个隐藏字段 + 每题两个
+     * {@code answer{id}} / {@code answertype{id}}。
+     *
+     * @param answers 题目 id → 答案（已确认过的，不是 AI 原始建议）
+     * @return 服务端是否接受
+     */
+    public boolean submitQuiz(QuizPaper paper, Map<String, String> answers) throws IOException {
+        if (paper == null || paper.size() == 0) {
+            return false;
+        }
+        String action = paper.getSubmitAction();
+        if (action == null || action.isEmpty()) {
+            System.out.println(Thread.currentThread().getName()
+                    + "[quiz] 没有 submitAction，拒绝提交");
+            return false;
+        }
+        String url = action.startsWith("http")
+                ? action
+                : "https://mooc1.chaoxing.com/mooc-ans/" + action;
+
+        FormBody.Builder form = new FormBody.Builder(StandardCharsets.UTF_8);
+        for (Map.Entry<String, String> e : paper.getForm().entrySet()) {
+            form.add(e.getKey(), e.getValue() == null ? "" : e.getValue());
+        }
+        for (QuizQuestion q : paper.getQuestions()) {
+            String ans = answers.containsKey(q.getId())
+                    ? answers.get(q.getId())
+                    : q.getAnswer();
+            if (ans == null || ans.isEmpty()) {
+                // 有一题没答案就整份不交：交上去是确定扣分，不如留着让人补
+                System.out.println(Thread.currentThread().getName()
+                        + "[quiz] 第 " + q.getId() + " 题没有答案，整份不提交");
+                return false;
+            }
+            form.add("answer" + q.getId(), ans);
+            form.add("answertype" + q.getId(), String.valueOf(q.getAnswerType()));
+        }
+
+        OkHttpClient client = initSession(false, false);
+        Request request = new Request.Builder()
+                .url(url)
+                .post(form.build())
+                .header("Host", "mooc1.chaoxing.com")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Origin", "https://mooc1.chaoxing.com")
+                .header("Referer", "https://mooc1.chaoxing.com/mooc-ans/work/doHomeWorkNew")
+                .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        + "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        + "Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0")
+                .build();
+
+        try (Response resp = client.newCall(request).execute()) {
+            String body = resp.body() == null ? "" : resp.body().string();
+            System.out.println(Thread.currentThread().getName()
+                    + "[quiz] 提交 " + paper.getTitle() + " -> HTTP " + resp.code()
+                    + " " + (body.length() > 300 ? body.substring(0, 300) : body));
+            if (!resp.isSuccessful()) {
+                return false;
+            }
+            // 服务端成功时返回 {"status":true,"msg":"success"}，但也见过
+            // status 是字符串 "true" 的，两种都认
+            String t = body.replaceAll("\\s+", "");
+            return t.contains("\"status\":true") || t.contains("\"status\":\"true\"");
+        }
+    }
 }

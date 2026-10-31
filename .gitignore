@@ -49,6 +49,11 @@ client/_shot/
 cookie*
 *.cookie
 
+# AI 配置里有 api_key，绝不能进仓库
+app/ai-config.json
+# 抓不到题时落下的原始页面（含课程名/题目，属于个人数据）
+app/quiz-dump/
+
 # ---------- 本地环境相关（含本机绝对路径 / 账号，严禁入库）----------
 my.ini
 settings.xml

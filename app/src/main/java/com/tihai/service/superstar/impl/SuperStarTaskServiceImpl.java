@@ -67,6 +67,9 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
     private CourseUtil courseUtil;
 
     @Autowired
+    private com.tihai.service.quiz.QuizService quizService;
+
+    @Autowired
     private SuperStarLogService superStarLogService;
 
     @Autowired
@@ -691,12 +694,14 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                 for (Job job : jobs) {
                     try {
 
-                        // 答题功能已移除：做题 / 章节测验 / 作业（type=workid）
-                        // 一律无条件跳过，不存在任何自动作答路径。
+                        // 做题 / 章节测验（type=workid）走半自动：抓题 → 问 AI →
+                        // 落库等人工确认，然后**继续下一章**。
+                        //
+                        // 这里绝不能停下来等用户点确认 —— 刷课线程是单线程串行的，
+                        // 一停整门课就卡死。所以 prepare() 只负责把卷子备好，
+                        // 真正的提交由界面点「确认」时走 QuizController。
                         if (JobTypeConstant.QUESTION.equals(job.getType())) {
-                            System.out.println(Thread.currentThread().getName()
-                                    + "[skip]答题功能已移除，跳过[workid]: "
-                                    + readyCourse.getTitle() + " / " + job.getTitle());
+                            prepareQuiz(readyCourse, job, jobInfo.get(0), log);
                             continue;
                         }
 
@@ -744,13 +749,9 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
                                 courseUtil.studyRead(readyCourse, job, jobInfo.get(0), log);
                                 break;
                             case JobTypeConstant.QUESTION:
-                                // 2026-10-15 用户要求「删掉答题功能」：工具只负责刷视频，
-                                // 做题 / 章节测验 / 作业 一律跳过 —— 不存在任何作答/提交路径，
-                                // 无论 skip-job-types 里有没有写 workid。
-                                // 需要完成这些任务点时，由用户自己（或在外部完成）去超星提交。
-                                System.out.println(Thread.currentThread().getName()
-                                        + "[skip]答题功能已移除，跳过[workid]: "
-                                        + readyCourse.getTitle() + " / " + job.getTitle());
+                                // 理论上上面那个 if 已经拦掉了，这里是兜底：
+                                // 万一将来有人删了那个 if，也不会变成静默跳过。
+                                prepareQuiz(readyCourse, job, jobInfo.get(0), log);
                                 break;
                             default:
                                 // FIX(2026-10-11): 老实现静默 break，未知类型（讨论 / 直播 / 测验…）
@@ -922,5 +923,26 @@ public class SuperStarTaskServiceImpl extends ServiceImpl<SuperStarMapper, Super
             }
         }
         return out;
+    }
+
+    /**
+     * 备一份章节测验：抓题 → 问 AI → 落库，然后立刻返回。
+     *
+     * <p>**这里不能等用户确认。** 刷课线程核心线程数是 1（单课串行是硬约束），
+     * 一旦在这里阻塞等人点按钮，整门课就停了。所以只把卷子准备好，
+     * 提交交给界面上点「确认」时走 {@code QuizController}。
+     *
+     * <p>任何异常都吞掉：做题失败不能让整门课的刷课跟着崩。
+     */
+    private void prepareQuiz(Course course, Job job, JobInfo jobInfo, SuperStarLog log) {
+        String who = Thread.currentThread().getName();
+        try {
+            System.out.println(who + "[quiz] 准备测验: "
+                    + course.getTitle() + " / " + job.getTitle());
+            long id = quizService.prepare(course, job, jobInfo, log.getLoginAccount());
+            System.out.println(who + "[quiz] 已生成待确认卷 #" + id + ": " + job.getTitle());
+        } catch (Throwable t) {
+            System.out.println(who + "[quiz] 准备测验失败（已跳过）: " + t);
+        }
     }
 }

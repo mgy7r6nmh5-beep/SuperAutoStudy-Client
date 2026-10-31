@@ -1,0 +1,53 @@
+package com.tihai.common;
+
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 一份章节测验：提交要用的表单字段 + 题目列表。
+ *
+ * <p>超星提交作业是把整个 form 原样 POST 回去，只把 {@code answer{id}} 和
+ * {@code answertype{id}} 换成实际值。所以抓题时必须把页面 form 里**除了
+ * answer* 以外**的所有 input 都存下来，少一个字段服务端就拒。
+ */
+@Data
+@NoArgsConstructor
+public class QuizPaper {
+
+    private String courseId;
+    private String courseName;
+    private String clazzId;
+    private String cpi;
+    private String knowledgeId;
+
+    /** 形如 {@code work-2d4ca13ec9c34b109cd0e8d97588fd30}。 */
+    private String jobId;
+
+    /** 去掉 work- 前缀的纯 id，提交时用。 */
+    private String workId;
+
+    private String title;
+
+    /**
+     * 提交地址，直接从页面 {@code <form action="...">} 抄。
+     *
+     * <p>别硬编码成 {@code /mooc-ans/work/addStudentWorkNewWeb}：action 里带着
+     * {@code token}、{@code enc_work}、{@code workAnswerId}、{@code totalQuestionNum}
+     * 这些每次会话都变的参数，少了必然被服务端拒。
+     */
+    private String submitAction;
+
+    /** 页面 form 里的隐藏字段（不含 answer*）。提交时原样带上。 */
+    private Map<String, String> form = new LinkedHashMap<>();
+
+    private List<QuizQuestion> questions;
+
+    /** 抓到几道题。0 通常意味着选择器过期或者被返回了提示页。 */
+    public int size() {
+        return questions == null ? 0 : questions.size();
+    }
+}

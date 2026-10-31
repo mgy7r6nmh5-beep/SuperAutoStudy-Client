@@ -2,6 +2,7 @@ package com.tihai.utils;
 
 
 import com.tihai.common.*;
+import com.tihai.constant.QuestionTypeConstant;
 import com.tihai.dubbo.pojo.course.Course;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -435,5 +436,147 @@ public class Decode {
             }
         }
         return out;
+    }
+
+    // ========================================================================
+    // 章节测验（做题）
+    // ========================================================================
+
+    /**
+     * 解析超星「做作业」页，得到一份可提交的测验。
+     *
+     * <p>2026-10 实测结构（劳动理论教育 1.1）：
+     * <pre>
+     * &lt;div class="singleQuesId" data="405548275"&gt;
+     *   &lt;div class="TiMu newTiMu" data="0"&gt;              ← data 是题型码
+     *     &lt;div class="Zy_TItle"&gt;
+     *       &lt;i&gt;1&lt;/i&gt;
+     *       &lt;div class="font-cxsecret fontLabel"&gt;
+     *         &lt;span class="newZy_TItle"&gt;【单选题】&lt;/span&gt;&lt;p&gt;题干（被字体混淆）&lt;/p&gt;
+     *       &lt;/div&gt;
+     *     &lt;/div&gt;
+     *     &lt;ul class="Zy_ulTop"&gt;
+     *       &lt;li class="font-cxsecret"&gt;
+     *         &lt;span class="num_option" data="A"&gt;A&lt;/span&gt;
+     *         &lt;a&gt;&lt;p&gt;选项文本（也被混淆）&lt;/p&gt;&lt;/a&gt;
+     *       &lt;/li&gt;
+     *     &lt;/ul&gt;
+     *     &lt;input type="hidden" name="answer405548275" value=""&gt;
+     *     &lt;input type="hidden" name="answertype405548275" value="0"&gt;
+     *   &lt;/div&gt;
+     * &lt;/div&gt;
+     * </pre>
+     *
+     * <p>题干和选项都过一遍字体解码；题号和选项字母（A/B/C/D）是明文，不用管。
+     * 解析出 0 道题通常意味着拿到了提示页而不是题目页，调用方应该把原始 HTML
+     * 落盘再排查，别当成「这题没题目」放过。
+     */
+    public static QuizPaper decodeQuizPaper(String html) {
+        QuizPaper paper = new QuizPaper();
+        Document doc = Jsoup.parse(html);
+
+        // 字体解码器：没混淆的卷子（比如纯填空题）可能没有 cxSecretStyle，
+        // 这时候退化成「不解码」，不能因为这一步把整份卷子判死。
+        FontDecoder fd = null;
+        try {
+            fd = new FontDecoder(html);
+        } catch (Exception ignore) {
+            // 没有字体混淆，原文即真文
+        }
+
+        Element form = doc.selectFirst("form");
+        if (form != null) {
+            // action 里带着本次会话的 token / enc_work / workAnswerId，必须原样用
+            paper.setSubmitAction(form.attr("action"));
+            for (Element input : form.select("input")) {
+                String name = input.attr("name");
+                if (name == null || name.isEmpty() || name.startsWith("answer")) {
+                    continue;
+                }
+                paper.getForm().put(name, input.attr("value"));
+            }
+        }
+
+        List<QuizQuestion> questions = new ArrayList<>();
+        for (Element div : doc.select("div.singleQuesId")) {
+            String qid = div.attr("data");
+            if (qid == null || qid.isEmpty()) {
+                continue;
+            }
+            Element tiMu = div.selectFirst("div.TiMu");
+            int code;
+            try {
+                code = Integer.parseInt(tiMu == null ? "0" : tiMu.attr("data").trim());
+            } catch (NumberFormatException e) {
+                code = QuestionTypeConstant.SINGLE_CHOICE;
+            }
+
+            QuizQuestion q = new QuizQuestion();
+            q.setId(qid);
+            q.setAnswerType(code);
+            q.setType(QuestionTypeConstant.nameOf(code));
+
+            // 题干：去掉「【单选题】」这类前缀标签，只要正文
+            Element titleBox = div.selectFirst("div.Zy_TItle");
+            String rawTitle = "";
+            if (titleBox != null) {
+                Element body = titleBox.selectFirst("div.fontLabel");
+                rawTitle = body != null ? body.text() : titleBox.text();
+            }
+            if (fd != null) {
+                rawTitle = fd.decode(rawTitle);
+            }
+            q.setTitle(stripTypeTag(rawTitle));
+
+            // 选项
+            List<String> options = new ArrayList<>();
+            for (Element li : div.select("ul.Zy_ulTop li")) {
+                Element letter = li.selectFirst("span.num_option");
+                Element text = li.selectFirst("a p");
+                if (text == null) {
+                    text = li.selectFirst("a");
+                }
+                String content = text == null ? "" : text.text();
+                if (fd != null) {
+                    content = fd.decode(content);
+                }
+                String mark = letter == null ? "" : letter.attr("data").trim();
+                if (mark.isEmpty()) {
+                    mark = String.valueOf((char) ('A' + options.size()));
+                }
+                options.add(mark + ". " + content.trim());
+            }
+            q.setOptions(options);
+
+            // 页面已经把 answertype 写好了，以它为准（自己映射容易和 Decode 对不上）
+            Element typeInput = div.selectFirst("input[name=answertype" + qid + "]");
+            if (typeInput != null) {
+                try {
+                    q.setAnswerType(Integer.parseInt(typeInput.attr("value").trim()));
+                    q.setType(QuestionTypeConstant.nameOf(q.getAnswerType()));
+                } catch (NumberFormatException ignore) {
+                    // 保留 TiMu 的 data 值
+                }
+            }
+
+            questions.add(q);
+        }
+        paper.setQuestions(questions);
+        return paper;
+    }
+
+    /** 去掉题干开头的「【单选题】」「【判断题】」这类标签。 */
+    private static String stripTypeTag(String title) {
+        if (title == null) {
+            return "";
+        }
+        String t = title.trim();
+        if (t.startsWith("【")) {
+            int end = t.indexOf('】');
+            if (end > 0 && end < 12) {
+                t = t.substring(end + 1).trim();
+            }
+        }
+        return t;
     }
 }

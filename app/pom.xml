@@ -66,7 +66,10 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
-            <version>2.15.4</version> <!-- 最新稳定版 -->
+            <!-- 版本交给 Spring Boot 2.7.5 的 BOM 管，别手动钉。手动钉成 2.15.4 时
+                 jackson-core 还是 BOM 的 2.13.4，2.15 的 databind 调用 readTree /
+                 createObjectNode 会找不到 StreamConstraintsException 直接崩。 -->
+            <version>2.13.4</version>
         </dependency>
 
         <dependency>
@@ -79,7 +82,7 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
-            <version>2.15.4</version>
+            <version>2.13.4</version>
         </dependency>
         <!-- https://mvnrepository.com/artifact/org.apache.pdfbox/pdfbox -->
         <dependency>
