@@ -1066,11 +1066,14 @@ SELECT account, CHAR_LENGTH(COALESCE(cookies, '')) AS cookie_len
                     "        FROM th_wk_log t JOIN (SELECT login_account, course_name, MAX(id) AS mid "
                     "                FROM th_wk_log GROUP BY login_account, course_name) m ON t.id = m.mid"
                     "  ) l ON l.login_account = q.login_account AND l.course_name = q.course_name "
-                    " WHERE q.status IN (2, 5)")
+                    " WHERE q.status IN (2, 5) OR (q.status = 0 AND l.lstatus = 5)")
                 rows = cur.fetchall()
                 finished, stuck, failed = [], [], []
                 for row_id, qstatus, creat_time, lstatus, start_time, end_time in rows:
-                    if qstatus == 5:
+                    # 后端把「系统异常 / 未刷完」写成 queue.status=0 + log.status=5，
+                    # 而不是 queue.status=5。只按 (2,5) 捞会永远漏掉这批，
+                    # 界面上点「续刷 / 重试」就一点反应都没有。
+                    if qstatus == 5 or (qstatus == 0 and lstatus == 5):
                         failed.append(row_id)
                         continue
                     if lstatus == 4:
