@@ -71,6 +71,12 @@ console-shot.png
 *.iml
 *.swp
 
+# ---------- 远程访问工具（私钥 / cookie / 本机配置，绝不能入库）----------
+# 整个 tools/ 都不入库：里面有 classmate_key、dg.cookie、cloudflared 配置
+# 等本机私密数据。之前只列了单个文件，但 git 会把 tools/ 整个当成新目录
+# 加进来，漏网的 cookie 和日志照样会进公开仓库。
+tools/
+
 # ---------- 系统 ----------
 Thumbs.db
 Desktop.ini
